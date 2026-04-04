@@ -1,13 +1,12 @@
+import sys
+
 def read_syscalls():
-    syscalls = []
-
+    """Reads syscalls live from the terminal input (stdin)"""
     try:
-        with open("trace.log", "r") as f:
-            for line in f:
-                if "(" in line:
-                    syscall = line.split("(")[0].strip()
-                    syscalls.append(syscall)
-    except FileNotFoundError:
-        print("trace.log not found. Run strace first.")
-
-    return syscalls
+        # This allows the engine to process lines one-by-one as they arrive
+        for line in sys.stdin:
+            if "(" in line:
+                syscall = line.split("(")[0].strip()
+                yield syscall
+    except EOFError:
+        pass
