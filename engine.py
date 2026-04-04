@@ -17,6 +17,12 @@ def run_engine():
             ai_result = detect_anomaly(sc)
             if ai_result == -1:
                 status = "SUSPICIOUS"
+<<<<<<< HEAD
+
+        log_data(sc, status)
+        print(f"Event Captured: {sc} -> {status}")
+=======
+>>>>>>> 2a9dcb7485b64b41a6ef8fd5798c430b3d096a5f
 
         log_data(sc, status)
         print(f"Event Captured: {sc} -> {status}")
