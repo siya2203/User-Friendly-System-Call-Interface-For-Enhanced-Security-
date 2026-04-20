@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureSyscall OS</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+</head>
+<body>
+<h1 class="page-title">User-Friendly System Call Interface for Enhanced Security - an OS-level security dashboard for monitoring, controlling, and auditing system calls in real time.</h1>
+<h2 class="sr-only">User-Friendly System Call Interface for Enhanced Security</h2>
+<div class="shell">
+  <div class="topbar">
+    <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
+    <div class="topbar-title">SecureSyscall OS - Enhanced Kernel Interface v3.0</div>
+    <div class="status-pill">KERNEL ACTIVE</div>
+  </div>
+  <div class="main-grid">
+    <div class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Monitor</div>
+        <button class="nav-item active" onclick="switchPanel('dashboard', event)"><span class="nav-icon">◇</span>Dashboard</button>
+        <button class="nav-item" onclick="switchPanel('live-log', event)"><span class="nav-icon">▤</span>Live Syscall Log<span class="badge warn" id="logBadge">0</span></button>
+        <button class="nav-item" onclick="switchPanel('processes', event)"><span class="nav-icon">◎</span>Process Monitor</button>
+        <button class="nav-item" onclick="switchPanel('threats', event)"><span class="nav-icon">■</span>Threat Alerts</button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Control</div>
+        <button class="nav-item" onclick="switchPanel('policy', event)"><span class="nav-icon">⊞</span>Policy Manager</button>
+        <button class="nav-item" onclick="switchPanel('syscalls', event)"><span class="nav-icon">⌘</span>Syscall Filter</button>
+        <button class="nav-item" onclick="switchPanel('sandbox', event)"><span class="nav-icon">○</span>Sandbox Runner</button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Audit</div>
+        <button class="nav-item" onclick="switchPanel('audit', event)"><span class="nav-icon">◷</span>Audit Trail</button>
+      </div>
+      <div class="security-box">
+        <div class="sidebar-label">Security Level</div>
+        <label><input type="radio" name="seclevel" value="permissive">Permissive</label>
+        <label><input type="radio" name="seclevel" value="enforcing" checked>Enforcing</label>
+        <label><input type="radio" name="seclevel" value="strict">Strict Lockdown</label>
+      </div>
+    </div>
+    <main class="content">
+      <section class="panel active" id="panel-dashboard">
+        <div class="panel-header"><div class="panel-title">Security Overview</div><div class="panel-sub" id="live-clock"></div></div>
+        <div class="stat-row">
+          <div class="stat-card"><div class="stat-label">SYSCALLS / SEC</div><div class="stat-value" id="s-rate">0</div><div class="stat-delta down">Live stream</div></div>
+          <div class="stat-card"><div class="stat-label">BLOCKED TODAY</div><div class="stat-value danger-text" id="s-blocked">0</div><div class="stat-delta up">Policy enforced</div></div>
+          <div class="stat-card"><div class="stat-label">ACTIVE POLICIES</div><div class="stat-value info-text" id="s-policies">0</div><div class="stat-delta down">Loaded from API</div></div>
+          <div class="stat-card"><div class="stat-label">THREAT SCORE</div><div class="stat-value warn-text" id="s-threat">0</div><div class="stat-delta warn-text">Adaptive score</div></div>
+        </div>
+        <div class="dashboard-grid">
+          <div class="card"><div class="card-title">Syscall Activity</div><canvas id="actChart" height="90"></canvas></div>
+          <div class="card"><div class="card-title">Category Distribution</div><div class="category-bars" id="categoryBars"></div></div>
+          <div class="card wide"><div class="card-title">Recent High-Risk Syscalls</div><div id="recentRisk"></div></div>
+        </div>
+      </section>
+      <section class="panel" id="panel-live-log">
+        <div class="panel-header"><div class="panel-title">Live Syscall Log</div><div class="panel-sub">Real-time kernel event stream</div></div>
+        <div class="filter-row">
+          <select id="filterAction" onchange="filterLog()"><option value="all">All actions</option><option value="allowed">Allowed</option><option value="blocked">Blocked</option><option value="sandboxed">Sandboxed</option><option value="audited">Audited</option></select>
+          <select id="filterCat" onchange="filterLog()"><option value="all">All categories</option><option value="file">File I/O</option><option value="net">Network</option><option value="proc">Process</option><option value="mem">Memory</option><option value="ipc">IPC</option></select>
+          <div class="count-label"><span id="logCount">0</span> events</div>
+        </div>
+        <div class="card flush"><div class="table-head log-head"><span>TIME</span><span>PID</span><span>SYSCALL</span><span>ARGUMENTS</span><span>ACTION</span></div><div id="logBody" class="scroll-body"></div></div>
+      </section>
+      <section class="panel" id="panel-processes">
+        <div class="panel-header"><div class="panel-title">Process Monitor</div><div class="panel-sub">Syscall activity per process</div></div>
+        <div class="card"><div class="card-title">Active Processes</div><div class="proc-row table-head"><div class="proc-name">PROCESS</div><div class="proc-pid">PID</div><div class="bar-cell">SYSCALL RATE</div><div class="proc-calls">COUNT</div><div class="risk-cell">RISK</div></div><div id="procList"></div></div>
+      </section>
+      <section class="panel" id="panel-threats">
+        <div class="panel-header"><div class="panel-title">Threat Alerts</div><div class="panel-sub">Anomaly and intrusion decisions</div></div>
+        <div class="stat-row">
+          <div class="stat-card"><div class="stat-label">CRITICAL</div><div class="stat-value danger-text" id="threatCritical">0</div></div>
+          <div class="stat-card"><div class="stat-label">HIGH</div><div class="stat-value warn-text" id="threatHigh">0</div></div>
+          <div class="stat-card"><div class="stat-label">MEDIUM</div><div class="stat-value info-text" id="threatMedium">0</div></div>
+          <div class="stat-card"><div class="stat-label">RESOLVED</div><div class="stat-value accent-text" id="threatResolved">0</div></div>
+        </div>
+        <div class="card"><div class="card-title">Active Threats</div><div id="threatList"></div></div>
+      </section>
+      <section class="panel" id="panel-policy">
+        <div class="panel-header"><div class="panel-title">Policy Manager</div><div class="panel-sub">Kernel-level enforcement rules</div></div>
+        <div class="card"><div class="card-title">Security Policies</div><div class="policy-row table-head"><span class="toggle-spacer"></span><span class="policy-text">POLICY</span><span class="policy-level">LEVEL</span></div><div id="policyList"></div></div>
+      </section>
+      <section class="panel" id="panel-syscalls">
+        <div class="panel-header"><div class="panel-title">Syscall Filter Table</div><div class="panel-sub">Per-syscall allow, audit, sandbox, block controls</div></div>
+        <div class="filter-row">
+          <select onchange="filterSyscalls(this.value)"><option value="all">All categories</option><option value="file">File I/O</option><option value="net">Network</option><option value="proc">Process</option><option value="mem">Memory</option><option value="ipc">IPC</option></select>
+          <div class="count-label">Click a syscall to rotate its mode</div>
+        </div>
+        <div class="syscall-grid" id="syscallGrid"></div>
+      </section>
+      <section class="panel" id="panel-sandbox">
+        <div class="panel-header"><div class="panel-title">Sandbox Runner</div><div class="panel-sub">Execute commands in a filtered environment</div></div>
+        <div class="card">
+          <div class="card-title">Sandbox Configuration</div>
+          <div class="sandbox-grid">
+            <div><div class="field-label">Profile</div><select id="sandboxProfile"><option value="minimal">Minimal</option><option value="web">Web client</option><option value="compiler">Compiler</option><option value="custom">Custom policy set</option></select></div>
+            <div><div class="field-label">Max run time</div><select id="sandboxTimeout"><option value="5">5 seconds</option><option value="30">30 seconds</option><option value="120">120 seconds</option></select></div>
+          </div>
+          <div class="field-label">Command</div>
+          <div class="input-row"><input class="cmd-input" id="cmdInput" type="text" placeholder="e.g. ls -la" value="cat /etc/shadow"><button class="run-btn" onclick="runSandbox()">Run</button></div>
+          <div class="terminal-box" id="termBox"><div class="t-line"><span class="t-prompt">secure$</span><span class="t-cmd">ready</span></div></div>
+        </div>
+      </section>
+      <section class="panel" id="panel-audit">
+        <div class="panel-header"><div class="panel-title">Audit Trail</div><div class="panel-sub">Tamper-evident log of policy decisions</div></div>
+        <div class="card flush"><div class="table-head audit-head"><span>TIMESTAMP</span><span>PID</span><span>SYSCALL</span><span>POLICY</span><span>DECISION</span><span>HASH</span></div><div id="auditBody" class="scroll-body tall"></div></div>
+      </section>
+    </main>
+  </div>
+</div>
+<script src="script.js"></script>
+</body>
+</html>
