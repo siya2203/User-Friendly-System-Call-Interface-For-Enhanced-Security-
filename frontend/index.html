@@ -1,117 +1,405 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SecureSyscall OS</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SecureSyscall OS — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1 class="page-title">User-Friendly System Call Interface for Enhanced Security - an OS-level security dashboard for monitoring, controlling, and auditing system calls in real time.</h1>
-<h2 class="sr-only">User-Friendly System Call Interface for Enhanced Security</h2>
-<div class="shell">
-  <div class="topbar">
-    <div class="dots"><div class="dot r"></div><div class="dot y"></div><div class="dot g"></div></div>
-    <div class="topbar-title">SecureSyscall OS - Enhanced Kernel Interface v3.0</div>
-    <div class="status-pill">KERNEL ACTIVE</div>
-  </div>
-  <div class="main-grid">
-    <div class="sidebar">
-      <div class="sidebar-section">
-        <div class="sidebar-label">Monitor</div>
-        <button class="nav-item active" onclick="switchPanel('dashboard', event)"><span class="nav-icon">◇</span>Dashboard</button>
-        <button class="nav-item" onclick="switchPanel('live-log', event)"><span class="nav-icon">▤</span>Live Syscall Log<span class="badge warn" id="logBadge">0</span></button>
-        <button class="nav-item" onclick="switchPanel('processes', event)"><span class="nav-icon">◎</span>Process Monitor</button>
-        <button class="nav-item" onclick="switchPanel('threats', event)"><span class="nav-icon">■</span>Threat Alerts</button>
+<div id="app">
+
+  <!-- ════════════════════════════════════════════
+       HEADER
+  ════════════════════════════════════════════ -->
+  <header id="header">
+    <div class="logo">Secure<span class="logo-slash">Syscall</span>&nbsp;OS</div>
+
+    <nav id="nav">
+      <button class="nav-btn active" onclick="showTab('dashboard', this)">
+        <span class="icon">⬡</span> Dashboard
+      </button>
+      <button class="nav-btn" onclick="showTab('analytics', this)">
+        <span class="icon">📈</span> Analytics
+      </button>
+      <button class="nav-btn" onclick="showTab('policies', this)">
+        <span class="icon">🔐</span> Policies
+      </button>
+      <button class="nav-btn" onclick="showTab('syscalls', this)">
+        <span class="icon">⚙️</span> Syscalls
+      </button>
+      <button class="nav-btn" onclick="showTab('processes', this)">
+        <span class="icon">🖥️</span> Processes
+      </button>
+      <button class="nav-btn" onclick="showTab('audit', this)">
+        <span class="icon">📋</span> Audit
+      </button>
+      <button class="nav-btn" onclick="showTab('threats', this)">
+        <span class="icon">🚨</span> Threats
+        <span id="threat-badge" class="threat-badge" style="display:none">0</span>
+      </button>
+      <button class="nav-btn" onclick="showTab('sandbox', this)">
+        <span class="icon">🧪</span> Sandbox
+      </button>
+    </nav>
+
+    <div class="header-right">
+      <span id="sec-badge" class="sec-badge medium">MEDIUM</span>
+      <div class="ws-indicator">
+        <div class="ws-dot off" id="ws-dot"></div>
+        <span id="ws-lbl">OFFLINE</span>
       </div>
-      <div class="sidebar-section">
-        <div class="sidebar-label">Control</div>
-        <button class="nav-item" onclick="switchPanel('policy', event)"><span class="nav-icon">⊞</span>Policy Manager</button>
-        <button class="nav-item" onclick="switchPanel('syscalls', event)"><span class="nav-icon">⌘</span>Syscall Filter</button>
-        <button class="nav-item" onclick="switchPanel('sandbox', event)"><span class="nav-icon">○</span>Sandbox Runner</button>
-      </div>
-      <div class="sidebar-section">
-        <div class="sidebar-label">Audit</div>
-        <button class="nav-item" onclick="switchPanel('audit', event)"><span class="nav-icon">◷</span>Audit Trail</button>
-      </div>
-      <div class="security-box">
-        <div class="sidebar-label">Security Level</div>
-        <label><input type="radio" name="seclevel" value="permissive">Permissive</label>
-        <label><input type="radio" name="seclevel" value="enforcing" checked>Enforcing</label>
-        <label><input type="radio" name="seclevel" value="strict">Strict Lockdown</label>
-      </div>
+      <span id="uptime-txt" title="Uptime">00:00:00</span>
     </div>
-    <main class="content">
-      <section class="panel active" id="panel-dashboard">
-        <div class="panel-header"><div class="panel-title">Security Overview</div><div class="panel-sub" id="live-clock"></div></div>
-        <div class="stat-row">
-          <div class="stat-card"><div class="stat-label">SYSCALLS / SEC</div><div class="stat-value" id="s-rate">0</div><div class="stat-delta down">Live stream</div></div>
-          <div class="stat-card"><div class="stat-label">BLOCKED TODAY</div><div class="stat-value danger-text" id="s-blocked">0</div><div class="stat-delta up">Policy enforced</div></div>
-          <div class="stat-card"><div class="stat-label">ACTIVE POLICIES</div><div class="stat-value info-text" id="s-policies">0</div><div class="stat-delta down">Loaded from API</div></div>
-          <div class="stat-card"><div class="stat-label">THREAT SCORE</div><div class="stat-value warn-text" id="s-threat">0</div><div class="stat-delta warn-text">Adaptive score</div></div>
+  </header>
+
+  <!-- ════════════════════════════════════════════
+       MAIN
+  ════════════════════════════════════════════ -->
+  <main id="main">
+
+    <!-- ── DASHBOARD ──────────────────────────── -->
+    <div class="tab active" id="tab-dashboard">
+
+      <!-- KPI row -->
+      <div class="g4">
+        <div class="stat-card" style="--card-accent:var(--accent)">
+          <span class="stat-icon">🔢</span>
+          <div class="stat-label">Total Syscalls</div>
+          <div class="stat-val" id="stat-total">0</div>
+          <div class="stat-sub">since startup</div>
         </div>
-        <div class="dashboard-grid">
-          <div class="card"><div class="card-title">Syscall Activity</div><canvas id="actChart" height="90"></canvas></div>
-          <div class="card"><div class="card-title">Category Distribution</div><div class="category-bars" id="categoryBars"></div></div>
-          <div class="card wide"><div class="card-title">Recent High-Risk Syscalls</div><div id="recentRisk"></div></div>
+        <div class="stat-card" style="--card-accent:var(--m-blocked)">
+          <span class="stat-icon">🚫</span>
+          <div class="stat-label">Blocked Calls</div>
+          <div class="stat-val" id="stat-blocked">0</div>
+          <div class="stat-sub">enforcement actions</div>
         </div>
-      </section>
-      <section class="panel" id="panel-live-log">
-        <div class="panel-header"><div class="panel-title">Live Syscall Log</div><div class="panel-sub">Real-time kernel event stream</div></div>
-        <div class="filter-row">
-          <select id="filterAction" onchange="filterLog()"><option value="all">All actions</option><option value="allowed">Allowed</option><option value="blocked">Blocked</option><option value="sandboxed">Sandboxed</option><option value="audited">Audited</option></select>
-          <select id="filterCat" onchange="filterLog()"><option value="all">All categories</option><option value="file">File I/O</option><option value="net">Network</option><option value="proc">Process</option><option value="mem">Memory</option><option value="ipc">IPC</option></select>
-          <div class="count-label"><span id="logCount">0</span> events</div>
+        <div class="stat-card" style="--card-accent:var(--m-allowed)">
+          <span class="stat-icon">🔐</span>
+          <div class="stat-label">Active Policies</div>
+          <div class="stat-val" id="stat-policies">0</div>
+          <div class="stat-sub">of total configured</div>
         </div>
-        <div class="card flush"><div class="table-head log-head"><span>TIME</span><span>PID</span><span>SYSCALL</span><span>ARGUMENTS</span><span>ACTION</span></div><div id="logBody" class="scroll-body"></div></div>
-      </section>
-      <section class="panel" id="panel-processes">
-        <div class="panel-header"><div class="panel-title">Process Monitor</div><div class="panel-sub">Syscall activity per process</div></div>
-        <div class="card"><div class="card-title">Active Processes</div><div class="proc-row table-head"><div class="proc-name">PROCESS</div><div class="proc-pid">PID</div><div class="bar-cell">SYSCALL RATE</div><div class="proc-calls">COUNT</div><div class="risk-cell">RISK</div></div><div id="procList"></div></div>
-      </section>
-      <section class="panel" id="panel-threats">
-        <div class="panel-header"><div class="panel-title">Threat Alerts</div><div class="panel-sub">Anomaly and intrusion decisions</div></div>
-        <div class="stat-row">
-          <div class="stat-card"><div class="stat-label">CRITICAL</div><div class="stat-value danger-text" id="threatCritical">0</div></div>
-          <div class="stat-card"><div class="stat-label">HIGH</div><div class="stat-value warn-text" id="threatHigh">0</div></div>
-          <div class="stat-card"><div class="stat-label">MEDIUM</div><div class="stat-value info-text" id="threatMedium">0</div></div>
-          <div class="stat-card"><div class="stat-label">RESOLVED</div><div class="stat-value accent-text" id="threatResolved">0</div></div>
+        <div class="stat-card" style="--card-accent:var(--m-audited)">
+          <span class="stat-icon">⚠️</span>
+          <div class="stat-label">Threat Score</div>
+          <div class="stat-val" id="stat-threat">0</div>
+          <div class="stat-sub">/ 100 — risk index</div>
         </div>
-        <div class="card"><div class="card-title">Active Threats</div><div id="threatList"></div></div>
-      </section>
-      <section class="panel" id="panel-policy">
-        <div class="panel-header"><div class="panel-title">Policy Manager</div><div class="panel-sub">Kernel-level enforcement rules</div></div>
-        <div class="card"><div class="card-title">Security Policies</div><div class="policy-row table-head"><span class="toggle-spacer"></span><span class="policy-text">POLICY</span><span class="policy-level">LEVEL</span></div><div id="policyList"></div></div>
-      </section>
-      <section class="panel" id="panel-syscalls">
-        <div class="panel-header"><div class="panel-title">Syscall Filter Table</div><div class="panel-sub">Per-syscall allow, audit, sandbox, block controls</div></div>
-        <div class="filter-row">
-          <select onchange="filterSyscalls(this.value)"><option value="all">All categories</option><option value="file">File I/O</option><option value="net">Network</option><option value="proc">Process</option><option value="mem">Memory</option><option value="ipc">IPC</option></select>
-          <div class="count-label">Click a syscall to rotate its mode</div>
+      </div>
+
+      <!-- Extra KPIs -->
+      <div class="g3 mb14">
+        <div class="stat-card" style="--card-accent:var(--c-network)">
+          <span class="stat-icon">⚡</span>
+          <div class="stat-label">Avg Rate</div>
+          <div class="stat-val" id="stat-rate">0</div>
+          <div class="stat-sub">syscalls / sec</div>
         </div>
-        <div class="syscall-grid" id="syscallGrid"></div>
-      </section>
-      <section class="panel" id="panel-sandbox">
-        <div class="panel-header"><div class="panel-title">Sandbox Runner</div><div class="panel-sub">Execute commands in a filtered environment</div></div>
+        <div class="stat-card" style="--card-accent:var(--c-process)">
+          <span class="stat-icon">🌐</span>
+          <div class="stat-label">WS Clients</div>
+          <div class="stat-val" id="stat-ws">0</div>
+          <div class="stat-sub">live connections</div>
+        </div>
+        <div class="stat-card" style="--card-accent:var(--c-fs)">
+          <span class="stat-icon">🕒</span>
+          <div class="stat-label">Security Level</div>
+          <div class="stat-val" style="font-size:18px;text-transform:uppercase" id="stat-level">MEDIUM</div>
+          <div class="stat-sub">current enforcement</div>
+        </div>
+      </div>
+
+      <div class="g2">
+        <!-- Live feed -->
         <div class="card">
-          <div class="card-title">Sandbox Configuration</div>
-          <div class="sandbox-grid">
-            <div><div class="field-label">Profile</div><select id="sandboxProfile"><option value="minimal">Minimal</option><option value="web">Web client</option><option value="compiler">Compiler</option><option value="custom">Custom policy set</option></select></div>
-            <div><div class="field-label">Max run time</div><select id="sandboxTimeout"><option value="5">5 seconds</option><option value="30">30 seconds</option><option value="120">120 seconds</option></select></div>
+          <div class="card-head">
+            <div class="card-title"><span class="ct-icon">◉</span> Live Syscall Stream</div>
+            <span style="color:var(--text-muted);font-size:10px" id="feed-count">0 events</span>
           </div>
-          <div class="field-label">Command</div>
-          <div class="input-row"><input class="cmd-input" id="cmdInput" type="text" placeholder="e.g. ls -la" value="cat /etc/shadow"><button class="run-btn" onclick="runSandbox()">Run</button></div>
-          <div class="terminal-box" id="termBox"><div class="t-line"><span class="t-prompt">secure$</span><span class="t-cmd">ready</span></div></div>
+          <!-- Feed header -->
+          <div class="feed-header">
+            <span>TIME</span><span>SYSCALL</span><span>PROCESS</span>
+            <span>PID</span><span>STATUS</span>
+          </div>
+          <div id="live-feed"></div>
         </div>
-      </section>
-      <section class="panel" id="panel-audit">
-        <div class="panel-header"><div class="panel-title">Audit Trail</div><div class="panel-sub">Tamper-evident log of policy decisions</div></div>
-        <div class="card flush"><div class="table-head audit-head"><span>TIMESTAMP</span><span>PID</span><span>SYSCALL</span><span>POLICY</span><span>DECISION</span><span>HASH</span></div><div id="auditBody" class="scroll-body tall"></div></div>
-      </section>
-    </main>
-  </div>
-</div>
+
+        <!-- Category stats -->
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title"><span class="ct-icon">📊</span> Category Breakdown</div>
+          </div>
+          <div class="card-body">
+            <div id="cat-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Security level control -->
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title"><span class="ct-icon">🎚️</span> Security Level Control</div>
+        </div>
+        <div class="card-body">
+          <p style="font-size:11px;color:var(--text-muted);margin-bottom:12px">
+            Adjusting the security level modifies enforcement modes for entire syscall categories.
+            <strong style="color:var(--m-blocked)">Critical</strong> blocks all network, debug and system calls.
+          </p>
+          <div class="level-btns">
+            <button class="level-btn low"      onclick="setSecLevel('low')">🟢 Low</button>
+            <button class="level-btn medium"   onclick="setSecLevel('medium')">🟡 Medium</button>
+            <button class="level-btn high"     onclick="setSecLevel('high')">🟠 High</button>
+            <button class="level-btn critical" onclick="setSecLevel('critical')">🔴 Critical</button>
+          </div>
+        </div>
+      </div>
+    </div><!-- /dashboard -->
+
+    <!-- ── ANALYTICS ──────────────────────────── -->
+    <div class="tab" id="tab-analytics">
+      <div class="section-title">📈 Syscall Analytics</div>
+
+      <div class="g2">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">Rate Window (60 s)</div>
+          </div>
+          <div class="card-body">
+            <canvas id="rate-chart" height="120"></canvas>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">Block Rate</div>
+          </div>
+          <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
+            <div>
+              <div class="stat-label">Block Rate</div>
+              <div class="stat-val" style="color:var(--m-blocked)" id="an-block-rate">0%</div>
+            </div>
+            <div>
+              <div class="stat-label">Total Events</div>
+              <div class="stat-val" id="an-total">0</div>
+            </div>
+            <div>
+              <div class="stat-label">Total Blocked</div>
+              <div class="stat-val" style="color:var(--m-blocked)" id="an-blocked">0</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Per-Category Stats</div>
+        </div>
+        <div class="card-body no-pad">
+          <table class="tbl">
+            <thead><tr>
+              <th>Category</th><th>Total</th><th>Blocked</th>
+              <th>Block Rate</th><th>Trend</th>
+            </tr></thead>
+            <tbody id="analytics-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /analytics -->
+
+    <!-- ── POLICIES ───────────────────────────── -->
+    <div class="tab" id="tab-policies">
+      <div class="section-title">🔐 Security Policies</div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Configured Policies</div>
+          <span class="muted" style="font-size:10px" id="pol-active-count"></span>
+        </div>
+        <div class="card-body no-pad">
+          <table class="tbl">
+            <thead><tr>
+              <th>#</th><th>Policy</th><th>Category</th>
+              <th>Description</th><th>Enabled</th>
+            </tr></thead>
+            <tbody id="pol-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /policies -->
+
+    <!-- ── SYSCALLS ───────────────────────────── -->
+    <div class="tab" id="tab-syscalls">
+      <div class="section-title">⚙️ Syscall Filter Table</div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">All Syscalls</div>
+          <div class="flex" style="gap:8px">
+            <select id="cat-filter" class="mode-sel" onchange="filterSyscalls()">
+              <option value="">All categories</option>
+              <option value="io">I/O</option>
+              <option value="fs">Filesystem</option>
+              <option value="memory">Memory</option>
+              <option value="process">Process</option>
+              <option value="network">Network</option>
+              <option value="signal">Signal</option>
+              <option value="debug">Debug</option>
+              <option value="device">Device</option>
+              <option value="system">System</option>
+            </select>
+            <input id="sc-search" class="search-input" oninput="filterSyscalls()"
+              placeholder="🔍 search syscall…" />
+          </div>
+        </div>
+        <div class="card-body no-pad">
+          <table class="tbl">
+            <thead><tr>
+              <th>Syscall</th><th>Category</th><th>Mode</th>
+              <th>Total</th><th>Blocked</th><th>Change Mode</th><th>Reset</th>
+            </tr></thead>
+            <tbody id="sc-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /syscalls -->
+
+    <!-- ── PROCESSES ──────────────────────────── -->
+    <div class="tab" id="tab-processes">
+      <div class="section-title">🖥️ Active Processes</div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Process Monitor</div>
+          <button class="btn-sm" onclick="refreshProcesses()">↻ Refresh</button>
+        </div>
+        <div class="card-body no-pad">
+          <table class="tbl">
+            <thead><tr>
+              <th>PID</th><th>Process</th><th>User</th>
+              <th>Status</th><th>Syscalls/s</th><th>Risk</th><th>Action</th>
+            </tr></thead>
+            <tbody id="proc-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /processes -->
+
+    <!-- ── AUDIT ──────────────────────────────── -->
+    <div class="tab" id="tab-audit">
+      <div class="section-title">📋 Audit Trail</div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Audit Log</div>
+          <div class="flex" style="gap:8px">
+            <select id="audit-cat" class="mode-sel" onchange="loadAudit()">
+              <option value="">All categories</option>
+              <option value="io">I/O</option>
+              <option value="fs">Filesystem</option>
+              <option value="memory">Memory</option>
+              <option value="process">Process</option>
+              <option value="network">Network</option>
+              <option value="debug">Debug</option>
+              <option value="system">System</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-muted)">
+              <input type="checkbox" id="audit-blocked-only" onchange="loadAudit()"> Blocked only
+            </label>
+            <button class="btn-sm" onclick="loadAudit()">↻</button>
+          </div>
+        </div>
+        <div class="card-body no-pad">
+          <table class="tbl">
+            <thead><tr>
+              <th>Time</th><th>Syscall</th><th>Category</th>
+              <th>Process</th><th>PID</th><th>Status</th>
+              <th>Flags</th><th>Args</th>
+            </tr></thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /audit -->
+
+    <!-- ── THREATS ─────────────────────────────── -->
+    <div class="tab" id="tab-threats">
+      <div class="section-title">🚨 Threat Intelligence</div>
+
+      <!-- Severity filter -->
+      <div class="flex mb14" style="gap:8px">
+        <button class="btn-sm" onclick="loadThreats('')">All</button>
+        <button class="btn-sm" style="color:var(--sev-critical)" onclick="loadThreats('critical')">● Critical</button>
+        <button class="btn-sm" style="color:var(--sev-high)"     onclick="loadThreats('high')">● High</button>
+        <button class="btn-sm" style="color:var(--sev-medium)"   onclick="loadThreats('medium')">● Medium</button>
+        <button class="btn-sm" style="color:var(--sev-low)"      onclick="loadThreats('low')">● Low</button>
+        <button class="btn-sm" style="margin-left:auto;color:var(--m-blocked)"
+          onclick="clearThreats()">🗑 Clear All</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Active Alerts</div>
+          <button class="btn-sm" onclick="loadThreats('')">↻</button>
+        </div>
+        <div class="card-body" id="threat-list" style="max-height:60vh;overflow-y:auto"></div>
+      </div>
+    </div><!-- /threats -->
+
+    <!-- ── SANDBOX ─────────────────────────────── -->
+    <div class="tab" id="tab-sandbox">
+      <div class="section-title">🧪 Sandbox Command Evaluator</div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Evaluate Command</div>
+        </div>
+        <div class="card-body">
+          <p style="font-size:11px;color:var(--text-muted);margin-bottom:14px">
+            Enter any command to evaluate it against active security policies.
+            No actual system calls are made — this is a pure policy simulation.
+          </p>
+          <div class="cmd-row">
+            <input class="cmd-input" id="cmd-input"
+              placeholder="e.g.  curl http://evil.com   |   rm -rf /   |   ls -la /etc"
+              onkeydown="if(event.key==='Enter') runSandbox()" />
+            <button class="run-btn" onclick="runSandbox()">▶ Evaluate</button>
+          </div>
+
+          <!-- Quick test buttons -->
+          <div class="flex" style="gap:6px;margin-bottom:14px;flex-wrap:wrap">
+            <span style="font-size:10px;color:var(--text-muted)">Quick tests:</span>
+            <button class="btn-sm" onclick="quickTest('ls -la')">ls</button>
+            <button class="btn-sm" onclick="quickTest('curl http://evil.com')">curl</button>
+            <button class="btn-sm" onclick="quickTest('cat /etc/shadow')">shadow</button>
+            <button class="btn-sm" onclick="quickTest('rm -rf /')">rm -rf /</button>
+            <button class="btn-sm" onclick="quickTest('python3 exploit.py')">python3</button>
+            <button class="btn-sm" onclick="quickTest('nmap -sS 192.168.1.0/24')">nmap</button>
+          </div>
+
+          <div class="sandbox-out" id="sandbox-out">
+            <span class="muted">Enter a command above and click <strong>Evaluate</strong> to test it against policies.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">How the Policy Engine Works</div>
+        </div>
+        <div class="card-body" style="font-size:11px;color:var(--text-muted);line-height:2">
+          <div>1. <span style="color:var(--text-primary)">Command normalisation</span> — strips path prefixes, lowercases</div>
+          <div>2. <span style="color:var(--text-primary)">Blocked-command lookup</span> — exact match against deny list</div>
+          <div>3. <span style="color:var(--text-primary)">Sensitive-path check</span> — argument scanning for /etc/shadow etc.</div>
+          <div>4. <span style="color:var(--text-primary)">Risky-flag scoring</span> — -rf, --force, URL patterns add risk</div>
+          <div>5. <span style="color:var(--text-primary)">Risk threshold gate</span> — cumulative score ≥ 80 → auto-block</div>
+          <div>6. <span style="color:var(--text-primary)">Audit-list match</span> — known-safe commands are logged + allowed</div>
+          <div>7. <span style="color:var(--text-primary)">Default sandbox</span> — unknown commands run in restricted jail</div>
+        </div>
+      </div>
+    </div><!-- /sandbox -->
+
+  </main>
+</div><!-- /app -->
+
 <script src="script.js"></script>
 </body>
 </html>

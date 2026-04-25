@@ -1,441 +1,517 @@
+"""
+SecureSyscall OS — FastAPI Backend (main.py)  v2.1
+====================================================
+Serves the frontend and exposes all REST + WebSocket endpoints.
+
+New in v2.1
+-----------
+* /api/analytics  — rolling 60-second rate window + blocked rate
+* /api/alerts     — severity-filtered alert stream
+* /api/processes/{pid}/kill  — sandbox-kill a simulated process
+* /api/syscalls/{name}/reset — reset counters for a single syscall
+* /ws/live now broadcasts enriched events (rate_flag, priv_esc)
+* In-memory circular buffers capped with collections.deque
+* Proper CORS, startup/shutdown lifecycle hooks
+* Basic HTTP Bearer token auth stub (token = "demo")
+"""
+
 import asyncio
-import hashlib
-import json
 import random
-import shlex
 import time
+import json
+import uuid
 from collections import deque
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from datetime import datetime, timezone
+from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
 
-BASE_DIR = Path(__file__).resolve().parent
-FRONTEND_DIR = BASE_DIR.parent / "frontend"
-
+# ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="SecureSyscall OS API",
-    description="User-friendly system call monitoring and security policy enforcement",
-    version="3.0.0",
+    title="SecureSyscall OS",
+    version="2.1.0",
+    description="User-friendly syscall monitoring & policy enforcement dashboard",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+# ── Auth stub ──────────────────────────────────────────────────────────────────
+security = HTTPBearer(auto_error=False)
+DEMO_TOKEN = "demo"
 
-syscall_log = deque(maxlen=600)
-audit_trail = deque(maxlen=250)
-blocked_count = 0
-threat_score = 34
-security_level = "enforcing"
-started_at = time.time()
+def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    """Optional bearer-token check. Returns True if auth disabled or token valid."""
+    if credentials is None:
+        return True   # auth not supplied → allow (demo mode)
+    if credentials.credentials != DEMO_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return True
 
+# ── In-memory state ────────────────────────────────────────────────────────────
+SYSCALLS = [
+    {"name": "read",      "category": "io",      "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "write",     "category": "io",      "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "open",      "category": "io",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "close",     "category": "io",      "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "stat",      "category": "fs",      "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "fstat",     "category": "fs",      "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "chmod",     "category": "fs",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "chown",     "category": "fs",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "unlink",    "category": "fs",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "rename",    "category": "fs",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "mkdir",     "category": "fs",      "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "mmap",      "category": "memory",  "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "mprotect",  "category": "memory",  "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "munmap",    "category": "memory",  "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "fork",      "category": "process", "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "execve",    "category": "process", "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "getpid",    "category": "process", "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "getuid",    "category": "process", "mode": "allowed",   "count": 0, "blocked": 0},
+    {"name": "kill",      "category": "signal",  "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "socket",    "category": "network", "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "connect",   "category": "network", "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "bind",      "category": "network", "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "listen",    "category": "network", "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "accept",    "category": "network", "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "sendmsg",   "category": "network", "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "recvmsg",   "category": "network", "mode": "sandboxed", "count": 0, "blocked": 0},
+    {"name": "ptrace",    "category": "debug",   "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "ioctl",     "category": "device",  "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "syslog",    "category": "system",  "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "setuid",    "category": "system",  "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "setgid",    "category": "system",  "mode": "audited",   "count": 0, "blocked": 0},
+    {"name": "mount",     "category": "system",  "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "umount2",   "category": "system",  "mode": "blocked",   "count": 0, "blocked": 0},
+    {"name": "clone",     "category": "process", "mode": "sandboxed", "count": 0, "blocked": 0},
+]
 
-class PolicyUpdate(BaseModel):
-    enabled: bool
+POLICIES = [
+    {"id": "p01", "name": "Block Raw Sockets",          "category": "network", "enabled": True,  "description": "Prevent creation of raw sockets"},
+    {"id": "p02", "name": "Audit File Opens",           "category": "fs",      "enabled": True,  "description": "Log every file open syscall"},
+    {"id": "p03", "name": "Restrict Process Spawn",     "category": "process", "enabled": True,  "description": "Sandbox fork and execve"},
+    {"id": "p04", "name": "Memory W^X Guard",           "category": "memory",  "enabled": False, "description": "Enforce write-xor-execute on mmap"},
+    {"id": "p05", "name": "Network Egress Filter",      "category": "network", "enabled": True,  "description": "Block outbound raw connections"},
+    {"id": "p06", "name": "Debug Lockdown",             "category": "debug",   "enabled": True,  "description": "Block ptrace and related calls"},
+    {"id": "p07", "name": "Privilege Escalation Guard", "category": "system",  "enabled": True,  "description": "Block setuid/setgid abuse"},
+    {"id": "p08", "name": "FS Integrity Check",         "category": "fs",      "enabled": False, "description": "Hash-verify sensitive paths on access"},
+    {"id": "p09", "name": "Fork Storm Detection",       "category": "process", "enabled": True,  "description": "Rate-limit excessive fork() calls"},
+    {"id": "p10", "name": "Mount Lockdown",             "category": "system",  "enabled": True,  "description": "Block mount/umount syscalls"},
+]
 
+# Use deques for O(1) append/pop
+AUDIT_LOG:    deque = deque(maxlen=800)
+THREAT_ALERTS: deque = deque(maxlen=200)
 
-class SyscallMode(BaseModel):
-    status: str = Field(pattern="^(allowed|audited|sandboxed|blocked)$")
+# Rolling per-second rate window (last 60 samples)
+RATE_WINDOW:  deque = deque(maxlen=60)
+_rate_count = 0
+_rate_ts    = time.monotonic()
 
+SECURITY_LEVEL = {"level": "medium"}
+START_TIME     = time.monotonic()
 
-class SecurityLevelUpdate(BaseModel):
-    level: str = Field(pattern="^(permissive|enforcing|strict)$")
+# Simulated process table
+PROC_NAMES = [
+    "nginx", "sshd", "python3", "node", "postgres",
+    "redis-server", "systemd", "dockerd", "curl", "bash",
+]
+PROC_TABLE: dict = {}   # pid -> process dict
 
-
-class SandboxCommand(BaseModel):
-    command: str = Field(min_length=1, max_length=160)
-    profile: str = "minimal"
-    timeout: int = Field(default=5, ge=1, le=120)
-
-
+# ── WebSocket Manager ──────────────────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
-        self.active_connections = set()
+        self.active: List[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active.append(ws)
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
+    def disconnect(self, ws: WebSocket):
+        if ws in self.active:
+            self.active.remove(ws)
 
-    async def broadcast(self, payload: dict):
-        disconnected = []
-        for websocket in self.active_connections:
+    async def broadcast(self, data: dict):
+        dead = []
+        msg  = json.dumps(data)
+        for ws in self.active:
             try:
-                await websocket.send_json(payload)
+                await ws.send_text(msg)
             except Exception:
-                disconnected.append(websocket)
-        for websocket in disconnected:
-            self.disconnect(websocket)
-
+                dead.append(ws)
+        for ws in dead:
+            self.active.remove(ws)
 
 manager = ConnectionManager()
 
-SYSCALL_DEFINITIONS = [
-    {"num": 0, "name": "read", "cat": "file", "status": "allowed"},
-    {"num": 1, "name": "write", "cat": "file", "status": "allowed"},
-    {"num": 2, "name": "open", "cat": "file", "status": "audited"},
-    {"num": 3, "name": "close", "cat": "file", "status": "allowed"},
-    {"num": 4, "name": "stat", "cat": "file", "status": "allowed"},
-    {"num": 5, "name": "fstat", "cat": "file", "status": "allowed"},
-    {"num": 8, "name": "lseek", "cat": "file", "status": "allowed"},
-    {"num": 9, "name": "mmap", "cat": "mem", "status": "sandboxed"},
-    {"num": 10, "name": "mprotect", "cat": "mem", "status": "blocked"},
-    {"num": 11, "name": "munmap", "cat": "mem", "status": "allowed"},
-    {"num": 12, "name": "brk", "cat": "mem", "status": "allowed"},
-    {"num": 17, "name": "pread64", "cat": "file", "status": "allowed"},
-    {"num": 39, "name": "getpid", "cat": "proc", "status": "allowed"},
-    {"num": 41, "name": "socket", "cat": "net", "status": "audited"},
-    {"num": 42, "name": "connect", "cat": "net", "status": "audited"},
-    {"num": 44, "name": "sendto", "cat": "net", "status": "audited"},
-    {"num": 45, "name": "recvfrom", "cat": "net", "status": "audited"},
-    {"num": 56, "name": "clone", "cat": "proc", "status": "sandboxed"},
-    {"num": 57, "name": "fork", "cat": "proc", "status": "sandboxed"},
-    {"num": 59, "name": "execve", "cat": "proc", "status": "sandboxed"},
-    {"num": 62, "name": "kill", "cat": "proc", "status": "audited"},
-    {"num": 101, "name": "ptrace", "cat": "proc", "status": "blocked"},
-    {"num": 105, "name": "setuid", "cat": "proc", "status": "audited"},
-    {"num": 165, "name": "mount", "cat": "file", "status": "blocked"},
-    {"num": 186, "name": "gettid", "cat": "proc", "status": "allowed"},
-    {"num": 217, "name": "getdents", "cat": "file", "status": "allowed"},
-    {"num": 257, "name": "openat", "cat": "file", "status": "audited"},
-]
+# ── Simulation ─────────────────────────────────────────────────────────────────
+def _ensure_processes():
+    """Keep the simulated process table populated."""
+    if len(PROC_TABLE) < 6:
+        for name in random.sample(PROC_NAMES, k=random.randint(5, 8)):
+            pid = random.randint(100, 9999)
+            if pid not in PROC_TABLE:
+                PROC_TABLE[pid] = {
+                    "pid": pid, "name": name,
+                    "user": random.choice(["root", "www-data", "ubuntu", "postgres"]),
+                    "risk": random.randint(0, 100),
+                    "syscalls_per_sec": round(random.uniform(0.2, 90), 1),
+                    "status": random.choice(["running", "sleeping", "running"]),
+                }
 
-POLICIES_STATE = [
-    {"name": "Deny ptrace from unprivileged processes", "desc": "Prevents process injection", "level": "CRITICAL", "on": True},
-    {"name": "Block writable executable memory", "desc": "Stops W+X page mappings", "level": "CRITICAL", "on": True},
-    {"name": "Restrict sensitive file reads", "desc": "Protects passwd and shadow paths", "level": "HIGH", "on": True},
-    {"name": "Audit network socket activity", "desc": "Records outbound network attempts", "level": "MEDIUM", "on": True},
-    {"name": "Sandbox risky process execution", "desc": "Runs execve activity in a jail", "level": "HIGH", "on": True},
-    {"name": "Gate filesystem mounts", "desc": "Requires privileged mount capability", "level": "HIGH", "on": True},
-    {"name": "Rate limit fork storms", "desc": "Detects fork bomb patterns", "level": "MEDIUM", "on": True},
-    {"name": "Deny raw socket creation", "desc": "Blocks packet crafting", "level": "MEDIUM", "on": False},
-    {"name": "Audit privilege changes", "desc": "Tracks setuid and setgid calls", "level": "MEDIUM", "on": True},
-    {"name": "Block process memory writes", "desc": "Protects direct memory interfaces", "level": "HIGH", "on": True},
-]
+def _simulate_event():
+    global _rate_count, _rate_ts
 
-PROCESSES = [
-    {"name": "nginx", "pid": 892},
-    {"name": "sshd", "pid": 1882},
-    {"name": "python3", "pid": 3302},
-    {"name": "systemd", "pid": 1},
-    {"name": "unknown", "pid": 4421},
-    {"name": "gcc", "pid": 2110},
-    {"name": "curl", "pid": 1102},
-    {"name": "bash", "pid": 445},
-]
+    sc      = random.choice(SYSCALLS)
+    sc["count"] += 1
 
-ARGUMENTS = {
-    "read": "fd={fd}, buf=0x{addr:x}, count={cnt}",
-    "write": "fd={fd}, buf=0x{addr:x}, count={cnt}",
-    "open": "/etc/passwd, O_RDONLY",
-    "openat": "AT_FDCWD, /etc/shadow, O_RDONLY",
-    "close": "fd={fd}",
-    "stat": "/var/log/syslog",
-    "fstat": "fd={fd}",
-    "lseek": "fd={fd}, offset=0, SEEK_SET",
-    "mmap": "addr=NULL, len={length}, PROT_READ|PROT_WRITE",
-    "mprotect": "addr=0x{addr:x}, len=4096, PROT_EXEC|PROT_WRITE",
-    "munmap": "addr=0x{addr:x}, len=4096",
-    "brk": "addr=0x{addr:x}",
-    "pread64": "fd={fd}, buf=0x{addr:x}, count={cnt}, offset=0",
-    "getpid": "",
-    "socket": "AF_INET, SOCK_STREAM, 0",
-    "connect": "sockfd={fd}, addr=192.168.{a}.{b}:{port}",
-    "sendto": "sockfd={fd}, buf=0x{addr:x}, len={cnt}",
-    "recvfrom": "sockfd={fd}, buf=0x{addr:x}, len={cnt}",
-    "clone": "flags=CLONE_VM|CLONE_FS",
-    "fork": "",
-    "execve": "/bin/sh, [\"/bin/sh\", \"-c\", \"...\"]",
-    "kill": "pid={pid}, sig=SIGTERM",
-    "ptrace": "PTRACE_ATTACH, target={pid}, addr=0x0",
-    "setuid": "uid={pid}",
-    "mount": "/dev/sdb1, /mnt/data, ext4",
-    "gettid": "",
-    "getdents": "fd={fd}, dirp=0x{addr:x}, count={cnt}",
-}
-
-
-def policy_for(name: str) -> str:
-    mapping = {
-        "ptrace": "P-01 ptrace deny",
-        "mprotect": "P-02 memory execute deny",
-        "open": "P-03 sensitive file gate",
-        "openat": "P-03 sensitive file gate",
-        "mount": "P-06 mount gate",
-        "execve": "P-05 sandbox exec",
-        "fork": "P-07 fork rate limit",
-        "clone": "P-07 clone rate limit",
-        "mmap": "P-05 memory sandbox",
-        "socket": "P-09 network audit",
-        "setuid": "P-10 privilege audit",
-    }
-    return mapping.get(name, "P-00 default policy")
-
-
-def adjusted_status(status: str) -> str:
-    if security_level == "permissive" and status in {"audited", "sandboxed"}:
-        return "allowed"
-    if security_level == "strict" and status == "audited":
-        return "sandboxed"
-    return status
-
-
-def make_hash(entry: dict) -> str:
-    raw = json.dumps(entry, sort_keys=True) + str(time.time_ns())
-    return hashlib.sha256(raw.encode()).hexdigest()[:10]
-
-
-def generate_syscall_event() -> dict:
-    global blocked_count, threat_score
-    definition = random.choice(SYSCALL_DEFINITIONS)
-    process = random.choice(PROCESSES)
-    name = definition["name"]
-    action = adjusted_status(definition["status"])
-    args = ARGUMENTS.get(name, "").format(
-        fd=random.randint(3, 25),
-        addr=random.randint(0x7F000000, 0x7FFFFFFF),
-        cnt=random.choice([64, 128, 256, 512, 1024, 4096]),
-        length=random.choice([4096, 8192, 65536]),
-        pid=random.randint(100, 5000),
-        a=random.randint(0, 255),
-        b=random.randint(0, 255),
-        port=random.choice([22, 80, 443, 3306, 8080]),
+    blocked = sc["mode"] == "blocked" or (
+        sc["mode"] == "sandboxed" and random.random() < 0.12
     )
-    event = {
-        "time": datetime.now().strftime("%H:%M:%S"),
-        "pid": str(process["pid"]),
-        "process": process["name"],
-        "call": f"{name}()",
-        "args": args,
-        "action": action,
-        "cat": definition["cat"],
-        "nr": definition["num"],
+    if blocked:
+        sc["blocked"] += 1
+
+    _rate_count += 1
+    now = time.monotonic()
+    if now - _rate_ts >= 1.0:
+        RATE_WINDOW.append(_rate_count)
+        _rate_count = 0
+        _rate_ts    = now
+
+    ts    = datetime.now(timezone.utc).isoformat()
+    pid   = random.choice(list(PROC_TABLE.keys())) if PROC_TABLE else random.randint(100, 9999)
+    proc  = PROC_TABLE.get(pid, {}).get("name", random.choice(PROC_NAMES))
+
+    # Occasionally simulate rate_flag / priv_esc
+    rate_flag = random.random() < 0.03
+    priv_esc  = sc["category"] == "system" and random.random() < 0.08
+
+    entry = {
+        "id":         str(uuid.uuid4()),
+        "time":       ts,
+        "syscall":    sc["name"],
+        "category":   sc["category"],
+        "mode":       sc["mode"],
+        "pid":        pid,
+        "process":    proc,
+        "blocked":    blocked,
+        "args":       f"fd={random.randint(0, 127)}" if sc["category"] in ("io", "fs") else "",
+        "rate_flag":  rate_flag,
+        "priv_esc":   priv_esc,
     }
-    syscall_log.appendleft(event)
-    if action == "blocked":
-        blocked_count += 1
-        threat_score = min(100, threat_score + random.randint(2, 5))
-    elif action == "sandboxed":
-        threat_score = min(100, threat_score + random.randint(0, 2))
-    else:
-        threat_score = max(0, threat_score - random.randint(0, 1))
-    if action in {"blocked", "sandboxed", "audited"}:
-        audit_trail.appendleft({
-            "ts": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "pid": str(process["pid"]),
-            "call": f"{name}()",
-            "policy": policy_for(name),
-            "decision": action.upper(),
-            "hash": make_hash(event),
+    AUDIT_LOG.append(entry)
+
+    sev_needed = blocked or rate_flag or priv_esc
+    if sev_needed and random.random() < 0.55:
+        if priv_esc:
+            sev = "critical"
+        elif rate_flag:
+            sev = "high"
+        else:
+            sev = random.choice(["low", "medium", "high", "critical"])
+
+        detail = ""
+        if priv_esc:
+            detail = f" [PRIV-ESC]"
+        elif rate_flag:
+            detail = f" [RATE-LIMIT]"
+
+        THREAT_ALERTS.append({
+            "id":       len(THREAT_ALERTS) + 1,
+            "time":     ts,
+            "severity": sev,
+            "message":  f"Blocked {sc['name']} from {proc} (PID {pid}){detail}",
+            "syscall":  sc["name"],
+            "category": sc["category"],
+            "priv_esc": priv_esc,
+            "rate_flag": rate_flag,
         })
-    return event
+    return entry
 
-
-def snapshot_categories() -> dict:
-    counts = {"file": 0, "net": 0, "proc": 0, "mem": 0, "ipc": 0}
-    for event in list(syscall_log)[:120]:
-        counts[event["cat"]] = counts.get(event["cat"], 0) + 1
-    total = sum(counts.values()) or 1
-    return {key: round(value * 100 / total) for key, value in counts.items()}
-
-
-def risk_for_process(pid: int) -> str:
-    recent = [event for event in syscall_log if event["pid"] == str(pid)]
-    blocked = sum(1 for event in recent if event["action"] == "blocked")
-    sandboxed = sum(1 for event in recent if event["action"] == "sandboxed")
-    if blocked >= 2 or sandboxed >= 4:
-        return "high"
-    if blocked == 1 or sandboxed >= 2:
-        return "medium"
-    return "low"
-
-
-@app.get("/")
-async def serve_frontend():
-    return FileResponse(str(FRONTEND_DIR / "index.html"))
-
-
-@app.get("/api/status")
-async def get_status():
-    return {
-        "syscall_rate": random.randint(900, 1500),
-        "blocked_total": blocked_count,
-        "active_policies": sum(1 for policy in POLICIES_STATE if policy["on"]),
-        "threat_score": threat_score,
-        "security_level": security_level,
-        "uptime_seconds": int(time.time() - started_at),
-        "categories": snapshot_categories(),
-    }
-
-
-@app.get("/api/log")
-async def get_log(action: Optional[str] = None, cat: Optional[str] = None, limit: int = 100):
-    entries = list(syscall_log)
-    if action and action != "all":
-        entries = [entry for entry in entries if entry["action"] == action]
-    if cat and cat != "all":
-        entries = [entry for entry in entries if entry["cat"] == cat]
-    return entries[: max(1, min(limit, 300))]
-
-
-@app.get("/api/processes")
-async def get_processes():
-    result = []
-    for process in PROCESSES:
-        recent = [event for event in syscall_log if event["pid"] == str(process["pid"])]
-        result.append({
-            **process,
-            "rate": min(100, 10 + len(recent) * 8 + random.randint(0, 20)),
-            "count": 1000 + len(recent) * random.randint(40, 120),
-            "risk": risk_for_process(process["pid"]),
-        })
-    return result
-
-
-@app.get("/api/policies")
-async def get_policies():
-    return POLICIES_STATE
-
-
-@app.put("/api/policies/{index}")
-async def update_policy(index: int, update: PolicyUpdate):
-    if index < 0 or index >= len(POLICIES_STATE):
-        raise HTTPException(status_code=404, detail="Policy not found")
-    POLICIES_STATE[index]["on"] = update.enabled
-    return {"ok": True, "policy": POLICIES_STATE[index]}
-
-
-@app.get("/api/syscalls")
-async def get_syscall_definitions():
-    return SYSCALL_DEFINITIONS
-
-
-@app.put("/api/syscalls/{name}")
-async def update_syscall_mode(name: str, update: SyscallMode):
-    for syscall in SYSCALL_DEFINITIONS:
-        if syscall["name"] == name:
-            syscall["status"] = update.status
-            return {"ok": True, "syscall": syscall}
-    raise HTTPException(status_code=404, detail="Syscall not found")
-
-
-@app.get("/api/audit")
-async def get_audit(limit: int = 80):
-    return list(audit_trail)[: max(1, min(limit, 200))]
-
-
-@app.get("/api/threats")
-async def get_threats():
-    recent = list(audit_trail)[:80]
-    return {
-        "critical": sum(1 for entry in recent if entry["decision"] == "BLOCKED" and "ptrace" in entry["call"]),
-        "high": sum(1 for entry in recent if entry["decision"] == "BLOCKED"),
-        "medium": sum(1 for entry in recent if entry["decision"] == "SANDBOXED"),
-        "resolved": max(4, len(recent) // 5),
-        "score": threat_score,
-        "items": recent[:6],
-    }
-
-
-@app.put("/api/security-level")
-async def set_security_level(update: SecurityLevelUpdate):
-    global security_level
-    security_level = update.level
-    return {"ok": True, "level": security_level}
-
-
-@app.post("/api/sandbox/run")
-async def run_sandbox(command: SandboxCommand):
-    global blocked_count, threat_score
-    text = command.command.strip()
-    tokens = shlex.split(text, posix=False)
-    root = tokens[0].lower() if tokens else ""
-    denied = any(marker in text.lower() for marker in ["/etc/shadow", "sudo", "rm -rf", "format", "reg delete"])
-    raw_network = root in {"ping", "tracert", "nmap"}
-    action = "BLOCKED" if denied or raw_network else "SANDBOXED"
-    if action == "BLOCKED":
-        blocked_count += 1
-        threat_score = min(100, threat_score + 4)
-    lines = [{"cls": "t-prompt", "text": "secure$ "}, {"cls": "t-cmd", "text": text}]
-    if denied:
-        lines.extend([
-            {"cls": "t-err", "text": "[SECCOMP] open or write syscall denied"},
-            {"cls": "t-err", "text": "[POLICY P-03] Sensitive operation blocked"},
-            {"cls": "t-warn", "text": "[AUDIT] Event logged and process terminated"},
-            {"cls": "t-output", "text": "Process exit code: SIGKILL"},
-        ])
-    elif raw_network:
-        lines.extend([
-            {"cls": "t-warn", "text": "[SECCOMP] socket syscall inspected"},
-            {"cls": "t-err", "text": "[POLICY P-08] Raw socket blocked"},
-            {"cls": "t-output", "text": "Operation not permitted inside minimal profile"},
-        ])
-    elif root in {"ls", "dir"}:
-        lines.extend([
-            {"cls": "t-ok", "text": "[SECCOMP] execve allowed inside sandbox"},
-            {"cls": "t-output", "text": "backend  frontend  requirements.txt"},
-            {"cls": "t-ok", "text": "[SANDBOX] Completed with read-only filesystem access"},
-        ])
-    else:
-        lines.extend([
-            {"cls": "t-ok", "text": "[SECCOMP] Syscall profile accepted"},
-            {"cls": "t-warn", "text": "[SANDBOX] Minimal jail active"},
-            {"cls": "t-output", "text": "Command simulated successfully"},
-            {"cls": "t-ok", "text": "[AUDIT] Completed with exit code 0"},
-        ])
-    audit_trail.appendleft({
-        "ts": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-        "pid": str(random.randint(2000, 9000)),
-        "call": "execve()",
-        "policy": "P-05 sandbox exec",
-        "decision": action,
-        "hash": hashlib.sha256(text.encode()).hexdigest()[:10],
-    })
-    return {"action": action, "lines": lines}
-
-
-@app.websocket("/ws/live")
-async def websocket_live(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            events = [generate_syscall_event() for _ in range(random.randint(1, 3))]
-            await websocket.send_json({
-                "type": "syscall_events",
-                "events": events,
-                "stats": {
-                    "rate": random.randint(900, 1500),
-                    "blocked": blocked_count,
-                    "threat_score": threat_score,
-                    "categories": snapshot_categories(),
-                },
-            })
-            await asyncio.sleep(0.8)
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
+async def simulation_loop():
+    _ensure_processes()
+    while True:
+        _ensure_processes()
+        event = _simulate_event()
+        await manager.broadcast({"type": "syscall_event", "data": event})
+        await asyncio.sleep(random.uniform(0.15, 0.8))
 
 @app.on_event("startup")
-async def startup_event():
-    for _ in range(45):
-        generate_syscall_event()
+async def startup():
+    _ensure_processes()
+    asyncio.create_task(simulation_loop())
 
+@app.on_event("shutdown")
+async def shutdown():
+    for ws in list(manager.active):
+        await ws.close()
 
-if __name__ == "__main__":
-    import uvicorn
+# ── REST API ───────────────────────────────────────────────────────────────────
+@app.get("/api/status")
+def get_status(_: bool = Depends(verify_token)):
+    total   = sum(s["count"]   for s in SYSCALLS)
+    blocked = sum(s["blocked"] for s in SYSCALLS)
+    active  = sum(1 for p in POLICIES if p["enabled"])
+    threat  = min(100, int(blocked / max(total, 1) * 220))
+    avg_rate = round(sum(RATE_WINDOW) / max(len(RATE_WINDOW), 1), 1)
+    return {
+        "total_syscalls":    total,
+        "blocked_calls":     blocked,
+        "active_policies":   active,
+        "threat_score":      threat,
+        "security_level":    SECURITY_LEVEL["level"],
+        "uptime_seconds":    int(time.monotonic() - START_TIME),
+        "ws_connections":    len(manager.active),
+        "avg_rate_per_sec":  avg_rate,
+        "rate_window_size":  len(RATE_WINDOW),
+    }
 
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+@app.get("/api/analytics")
+def get_analytics(_: bool = Depends(verify_token)):
+    """Rolling 60-second rate data + per-category totals."""
+    cats: dict = {}
+    for sc in SYSCALLS:
+        c = sc["category"]
+        if c not in cats:
+            cats[c] = {"total": 0, "blocked": 0}
+        cats[c]["total"]   += sc["count"]
+        cats[c]["blocked"] += sc["blocked"]
+
+    total   = sum(s["count"]   for s in SYSCALLS)
+    blocked = sum(s["blocked"] for s in SYSCALLS)
+    block_rate = round(blocked / max(total, 1) * 100, 2)
+
+    return {
+        "rate_window":  list(RATE_WINDOW),
+        "categories":   cats,
+        "block_rate_pct": block_rate,
+        "total":        total,
+        "blocked":      blocked,
+    }
+
+@app.get("/api/log")
+def get_log(limit: int = 50, _: bool = Depends(verify_token)):
+    entries = list(AUDIT_LOG)
+    return list(reversed(entries[-limit:]))
+
+@app.get("/api/processes")
+def get_processes(_: bool = Depends(verify_token)):
+    return list(PROC_TABLE.values())
+
+@app.delete("/api/processes/{pid}")
+def kill_process(pid: int, _: bool = Depends(verify_token)):
+    if pid not in PROC_TABLE:
+        raise HTTPException(404, "Process not found")
+    proc = PROC_TABLE.pop(pid)
+    THREAT_ALERTS.append({
+        "id":       len(THREAT_ALERTS) + 1,
+        "time":     datetime.now(timezone.utc).isoformat(),
+        "severity": "medium",
+        "message":  f"Process {proc['name']} (PID {pid}) sandboxed and killed by policy engine",
+        "syscall":  "kill",
+        "category": "signal",
+        "priv_esc": False,
+        "rate_flag": False,
+    })
+    return {"killed": pid, "name": proc["name"]}
+
+@app.get("/api/policies")
+def get_policies(_: bool = Depends(verify_token)):
+    return POLICIES
+
+@app.put("/api/policies/{index}")
+def update_policy(index: int, body: dict, _: bool = Depends(verify_token)):
+    if index < 0 or index >= len(POLICIES):
+        raise HTTPException(404, "Policy not found")
+    if "enabled" in body:
+        POLICIES[index]["enabled"] = bool(body["enabled"])
+    return POLICIES[index]
+
+@app.get("/api/syscalls")
+def get_syscalls(_: bool = Depends(verify_token)):
+    return SYSCALLS
+
+@app.put("/api/syscalls/{name}")
+def update_syscall(name: str, body: dict, _: bool = Depends(verify_token)):
+    for sc in SYSCALLS:
+        if sc["name"] == name:
+            if "mode" in body and body["mode"] in {"allowed", "audited", "sandboxed", "blocked"}:
+                sc["mode"] = body["mode"]
+            return sc
+    raise HTTPException(404, "Syscall not found")
+
+@app.post("/api/syscalls/{name}/reset")
+def reset_syscall_counters(name: str, _: bool = Depends(verify_token)):
+    for sc in SYSCALLS:
+        if sc["name"] == name:
+            sc["count"]   = 0
+            sc["blocked"] = 0
+            return {"reset": name}
+    raise HTTPException(404, "Syscall not found")
+
+@app.get("/api/audit")
+def get_audit(limit: int = 100, category: Optional[str] = None,
+              blocked_only: bool = False, _: bool = Depends(verify_token)):
+    entries = list(AUDIT_LOG)
+    if category:
+        entries = [e for e in entries if e.get("category") == category]
+    if blocked_only:
+        entries = [e for e in entries if e.get("blocked")]
+    return list(reversed(entries[-limit:]))
+
+@app.get("/api/threats")
+def get_threats(limit: int = 50, severity: Optional[str] = None,
+                _: bool = Depends(verify_token)):
+    alerts = list(THREAT_ALERTS)
+    if severity:
+        alerts = [a for a in alerts if a.get("severity") == severity]
+    return list(reversed(alerts[-limit:]))
+
+@app.delete("/api/threats")
+def clear_threats(_: bool = Depends(verify_token)):
+    THREAT_ALERTS.clear()
+    return {"cleared": True}
+
+class SecurityLevelBody(BaseModel):
+    level: str
+
+@app.put("/api/security-level")
+def set_security_level(body: SecurityLevelBody, _: bool = Depends(verify_token)):
+    if body.level not in {"low", "medium", "high", "critical"}:
+        raise HTTPException(400, "Invalid level. Must be: low | medium | high | critical")
+    SECURITY_LEVEL["level"] = body.level
+    if body.level == "critical":
+        for sc in SYSCALLS:
+            if sc["category"] in ("network", "debug", "system"):
+                sc["mode"] = "blocked"
+    elif body.level == "high":
+        for sc in SYSCALLS:
+            if sc["category"] in ("debug",):
+                sc["mode"] = "blocked"
+            if sc["category"] == "network" and sc["mode"] == "allowed":
+                sc["mode"] = "audited"
+    elif body.level == "low":
+        # Relax network to audited if currently blocked (only non-critical ones)
+        for sc in SYSCALLS:
+            if sc["category"] == "network" and sc["name"] not in ("listen", "accept"):
+                if sc["mode"] == "blocked":
+                    sc["mode"] = "audited"
+    return SECURITY_LEVEL
+
+class SandboxBody(BaseModel):
+    command: str
+
+DANGER = {
+    "rm", "dd", "mkfs", "fdisk", "shred", "wget", "curl", "nc",
+    "netcat", "bash", "sh", "python", "perl", "ruby", "nmap",
+    "tcpdump", "masscan", "ptrace", "strace", "ltrace", "mount",
+    "umount", "chroot", "insmod", "rmmod",
+}
+
+SENSITIVE_PATHS = [
+    "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+    "/root", "/boot", "/proc/kcore", "/dev/mem",
+    "/etc/ssh/", "/sys/kernel/",
+]
+
+@app.post("/api/sandbox/run")
+def sandbox_run(body: SandboxBody, _: bool = Depends(verify_token)):
+    if not body.command.strip():
+        raise HTTPException(400, "Empty command")
+
+    parts = body.command.strip().split()
+    cmd   = parts[0].lower().lstrip("./")
+    args  = parts[1:] if len(parts) > 1 else []
+
+    dangerous = cmd in DANGER
+    reason    = ""
+
+    sensitive_paths = [a for a in args if any(a.startswith(p) for p in SENSITIVE_PATHS)]
+    if sensitive_paths:
+        dangerous = True
+        reason    = f"Access to sensitive path '{sensitive_paths[0]}' denied"
+
+    if not reason:
+        dangerous_flags = [a for a in args if a in ("-rf", "--force", "-f", "--exec")]
+        if dangerous_flags:
+            dangerous = True
+            reason    = f"Dangerous flag '{dangerous_flags[0]}' detected"
+
+    if dangerous and not reason:
+        reason = f"'{cmd}' matches high-risk command policy"
+
+    if not dangerous:
+        reason = "All policy checks passed"
+
+    blocked_sc = random.sample(
+        ["execve", "socket", "connect", "fork", "mprotect"],
+        k=random.randint(1, 3)
+    ) if dangerous else []
+
+    risk_score = random.randint(72, 99) if dangerous else random.randint(2, 22)
+
+    return {
+        "command":          body.command,
+        "decision":         "BLOCK" if dangerous else "ALLOW",
+        "reason":           reason,
+        "blocked_syscalls": blocked_sc,
+        "risk_score":       risk_score,
+        "timestamp":        datetime.now(timezone.utc).isoformat(),
+        "cmd_parsed":       cmd,
+        "args_parsed":      args,
+    }
+
+@app.get("/api/health")
+def health():
+    return {
+        "status":  "ok",
+        "version": "2.1.0",
+        "uptime":  int(time.monotonic() - START_TIME),
+    }
+
+# ── WebSocket ──────────────────────────────────────────────────────────────────
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        # Send initial status snapshot
+        await websocket.send_text(json.dumps({
+            "type": "snapshot",
+            "data": {
+                "syscalls":  SYSCALLS,
+                "policies":  POLICIES,
+                "processes": list(PROC_TABLE.values()),
+            }
+        }))
+        while True:
+            # Keep connection alive; handle any client pings
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                if msg == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+            except asyncio.TimeoutError:
+                await websocket.send_text(json.dumps({"type": "heartbeat"}))
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
+
+# ── Serve Frontend ─────────────────────────────────────────────────────────────
+FRONTEND = Path(__file__).parent.parent / "frontend"
+
+if FRONTEND.exists():
+    @app.get("/")
+    async def root():
+        return FileResponse(FRONTEND / "index.html")
+
+    app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="frontend")

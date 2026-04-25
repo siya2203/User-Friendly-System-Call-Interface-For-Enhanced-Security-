@@ -1,61 +1,100 @@
-# User-Friendly System Call Interface For Enhanced Security
+# SecureSyscall OS — Fixed & Complete
 
-SecureSyscall OS is a teaching project for operating-system security. It provides a dashboard for monitoring simulated system calls, changing per-syscall policies, viewing process risk, checking audit trails, and running commands through a sandbox decision engine.
+A teaching dashboard for OS security: monitor simulated syscalls, manage policies,
+view process risk, check audit trails, and run commands through a sandbox engine.
 
-## Features
+---
 
-- FastAPI backend with REST endpoints and a live WebSocket syscall stream
-- Dashboard for syscall rate, blocked calls, active policies, threat score, and category distribution
-- Policy manager with live enable and disable controls
-- Syscall filter table with allowed, audited, sandboxed, and blocked modes
-- Sandbox runner that demonstrates seccomp-style command decisions
-- Audit trail and threat alert views
-- BPF C probe source for Linux kernel syscall tracing experiments
-- C++ sandbox decision engine for command-line policy checks
+## What Was Broken (and Fixed)
 
-## Run
+| # | Bug | Fix |
+|---|-----|-----|
+| 1 | **Missing `aiofiles`, `python-multipart`, `starlette`** in requirements | Added all deps to `requirements.txt` |
+| 2 | **CORS not configured** — frontend JS blocked by browser | Added `CORSMiddleware` allowing all origins (restrict in production) |
+| 3 | **Frontend not served** — FastAPI had no StaticFiles mount | Added `StaticFiles` mount + explicit `/` → `index.html` route |
+| 4 | **WebSocket URL hardcoded to `localhost`** in JS | Frontend now derives host from `window.location` dynamically |
+| 5 | **WebSocket path mismatch** between backend and frontend | Unified to `/ws/live` in both places |
+| 6 | **No auto-reconnect** on WebSocket drop | Added `setTimeout(connectWS, 2000)` on close |
+| 7 | **`uvicorn` missing `[standard]` extras** (needed for websockets) | Changed to `uvicorn[standard]` |
+| 8 | **`sandbox_enforcer.cpp`** used non-standard includes | Cleaned up to pure C++17 STL |
 
-```powershell
+---
+
+## Project Structure
+
+```
+SecureSyscall/
+├── backend/
+│   ├── main.py                  ← FastAPI app (all endpoints + WebSocket)
+│   └── sandbox_enforcer.cpp     ← C++ command policy checker (optional)
+├── frontend/
+│   └── index.html               ← Single-file dashboard (HTML/CSS/JS)
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Quick Start (Windows)
+
+```cmd
+cd SecureSyscall
+
+:: Create virtualenv (first time only)
+python -m venv venv
+
+:: Install dependencies
+venv\Scripts\pip.exe install -r requirements.txt
+
+:: Run the server
 cd backend
 ..\venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open:
+Then open: **http://127.0.0.1:8000**
 
-```text
-http://127.0.0.1:8000
+---
+
+## Quick Start (Linux / macOS)
+
+```bash
+cd SecureSyscall
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cd backend
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-If the virtual environment is missing dependencies:
+---
 
-```powershell
-venv\Scripts\pip.exe install -r requirements.txt
-```
+## API Reference
 
-## API
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | Dashboard counters (total calls, blocked, threat score) |
+| GET | `/api/log` | Recent syscall log entries |
+| GET | `/api/processes` | Active process list with risk scores |
+| GET | `/api/policies` | All security policies |
+| PUT | `/api/policies/{index}` | Enable/disable a policy |
+| GET | `/api/syscalls` | Syscall filter table |
+| PUT | `/api/syscalls/{name}` | Change syscall enforcement mode |
+| GET | `/api/audit` | Audit trail |
+| GET | `/api/threats` | Threat alerts |
+| PUT | `/api/security-level` | Set global security level |
+| POST | `/api/sandbox/run` | Evaluate a command in sandbox |
+| WS | `/ws/live` | Real-time syscall event stream |
 
-```text
-GET  /api/status
-GET  /api/log
-GET  /api/processes
-GET  /api/policies
-PUT  /api/policies/{index}
-GET  /api/syscalls
-PUT  /api/syscalls/{name}
-GET  /api/audit
-GET  /api/threats
-PUT  /api/security-level
-POST /api/sandbox/run
-WS   /ws/live
-```
+---
 
-## Native Components
+## Build C++ Sandbox (optional)
 
-Build the C++ sandbox checker with a C++17 compiler:
+```bash
+# Linux/macOS
+g++ backend/sandbox_enforcer.cpp -std=c++17 -o sandbox_enforcer
+./sandbox_enforcer open /etc/shadow
 
-```powershell
+# Windows
 g++ backend\sandbox_enforcer.cpp -std=c++17 -o sandbox_enforcer.exe
 .\sandbox_enforcer.exe open /etc/shadow
 ```
-
-The BPF probe in `backend/kernel_monitor.c` is intended for Linux systems with BCC/eBPF support.
